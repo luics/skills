@@ -36,36 +36,19 @@ case "$base_url" in
   *) echo "The public base URL must begin with http:// or https://." >&2; exit 64 ;;
 esac
 
+if [ -z "$identity" ]; then
+  echo "Set SCP_IDENTIFY or pass an SSH identity file." >&2
+  exit 64
+fi
+
+if [ ! -f "$identity" ]; then
+  echo "The SSH identity file does not exist." >&2
+  exit 66
+fi
+
 timestamp=$(timestamp_ms)
 filename="${stem}-${timestamp}.html"
-destination_host=${destination#*@}
-destination_host=${destination_host%%:*}
-local_directory=${destination#*:}
-public_ip=${SCP_PUBLIC_IP:-}
-
-if [ -z "$public_ip" ]; then
-  public_ip=$(curl --fail --silent --show-error --max-time 5 https://api.ipify.org 2>/dev/null || :)
-fi
-
-if [ -n "$public_ip" ] && [ "$destination_host" = "$public_ip" ]; then
-  if [ ! -d "$local_directory" ] || [ ! -w "$local_directory" ]; then
-    echo "The local publish directory is not writable: $local_directory" >&2
-    exit 73
-  fi
-  cp "$page" "$local_directory/$filename"
-else
-  if [ -z "$identity" ]; then
-    echo "Set SCP_IDENTIFY or pass an SSH identity file." >&2
-    exit 64
-  fi
-
-  if [ ! -f "$identity" ]; then
-    echo "The SSH identity file does not exist." >&2
-    exit 66
-  fi
-
-  scp -i "$identity" "$page" "$destination/$filename"
-fi
+scp -i "$identity" "$page" "$destination/$filename"
 
 url="$base_url/$filename"
 curl --fail --silent --show-error --location --max-time 20 --output /dev/null "$url"
