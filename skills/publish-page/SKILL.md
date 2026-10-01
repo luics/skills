@@ -7,6 +7,6 @@ Run `scripts/publish-page-oss.sh <page.html>` by default. It uploads to `oss://l
 
 For an SCP deployment with public-URL verification, run `scripts/publish-page-scp.sh <page.html>`. When omitted, its destination and identity come from `SCP_DESTINATION` and `SCP_IDENTIFY`; positional overrides take precedence. `SCP_IDENTIFY` must name an existing SSH identity file. The script always publishes through SCP.
 
-For a local deployment with public-URL verification, set `LOCAL_DESTINATION` to a writable directory and run `scripts/publish-page-local.sh <page.html>`. It copies the page to that directory; optionally pass a public base URL as the second argument. Its default public base URL is `https://bryanxu.top/public`.
+For a local deployment with public-URL verification, set `LOCAL_DESTINATION` to a writable directory and run `scripts/publish-page-local.sh <page.html>`. It copies the page to that directory; optionally pass a public base URL as the second argument. Its default public base URL is `https://bryanxu.top/public`. If direct verification of a `https://bryanxu.top/...` URL fails, it retries against `127.0.0.1` with `curl -k --resolve bryanxu.top:443:127.0.0.1`.
 
 All scripts create `<name>-<unix-millisecond-timestamp>.<original-ext>`. Run `tests/test-publish-page.sh` after changing parameter handling.

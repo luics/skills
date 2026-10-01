@@ -77,7 +77,7 @@ fi
 mock_bin="$test_dir/bin"
 mkdir "$mock_bin"
 printf '%s\n' '#!/bin/sh' '[ "${SCP_FORBID:-}" != 1 ] || exit 99' '[ "$1" = "-i" ] && [ "$2" = "$SCP_IDENTIFY" ] || exit 1' 'case "$4" in "$SCP_DESTINATION"/page-*.html) exit 0 ;; *) exit 1 ;; esac' > "$mock_bin/scp"
-printf '%s\n' '#!/bin/sh' 'exit 0' > "$mock_bin/curl"
+printf '%s\n' '#!/bin/sh' 'if [ "${CURL_FAIL_FIRST:-}" = 1 ] && [ ! -e "$CURL_STATE_FILE" ]; then touch "$CURL_STATE_FILE"; exit 1; fi' 'if [ "${CURL_EXPECT_LOCAL_FALLBACK:-}" = 1 ]; then [ "$1" = "-k" ] && [ "$2" = "--resolve" ] && [ "$3" = "bryanxu.top:443:127.0.0.1" ] || exit 1; fi' 'exit 0' > "$mock_bin/curl"
 chmod 755 "$mock_bin/scp" "$mock_bin/curl"
 touch "$test_dir/key"
 scp_output=$(SCP_DESTINATION="root@example.test:/srv/public" SCP_IDENTIFY="$test_dir/key" PATH="$mock_bin:$PATH" "$script" "$test_dir/page.html")
@@ -93,6 +93,16 @@ local_timestamp=${local_timestamp%.html}
 assert_millisecond_timestamp "$local_timestamp"
 if [ ! -f "$local_directory/page-$local_timestamp.html" ]; then
   echo "The local publish script did not copy the page." >&2
+  exit 1
+fi
+
+curl_state_file="$test_dir/curl-state"
+local_fallback_output=$(LOCAL_DESTINATION="$local_directory" CURL_FAIL_FIRST=1 CURL_STATE_FILE="$curl_state_file" CURL_EXPECT_LOCAL_FALLBACK=1 PATH="$mock_bin:$PATH" "$local_script" "$test_dir/page.html")
+local_fallback_timestamp=${local_fallback_output#https://bryanxu.top/public/page-}
+local_fallback_timestamp=${local_fallback_timestamp%.html}
+assert_millisecond_timestamp "$local_fallback_timestamp"
+if [ ! -e "$curl_state_file" ]; then
+  echo "The local publish fallback did not retry the URL." >&2
   exit 1
 fi
 

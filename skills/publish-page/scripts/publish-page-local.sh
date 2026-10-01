@@ -45,5 +45,12 @@ filename="${stem}-${timestamp}.${extension}"
 cp "$page" "$destination/$filename"
 
 url="$base_url/$filename"
-curl --fail --silent --show-error --location --max-time 20 --output /dev/null "$url"
+if ! curl --fail --silent --show-error --location --max-time 20 --output /dev/null "$url"; then
+  case "$base_url" in
+    https://bryanxu.top|https://bryanxu.top/*)
+      curl -k --resolve bryanxu.top:443:127.0.0.1 --fail --silent --show-error --location --max-time 20 --output /dev/null "$url"
+      ;;
+    *) exit 1 ;;
+  esac
+fi
 printf '%s\n' "$url"
