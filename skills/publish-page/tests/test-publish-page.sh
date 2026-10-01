@@ -35,7 +35,6 @@ assert_exit 64 "$script" "$test_dir/page.html" a b c d
 assert_exit 64 "$script" "$test_dir/page.txt"
 assert_exit 66 "$script" "$test_dir/missing.html"
 assert_exit 64 sh -c 'unset SCP_DESTINATION SCP_IDENTIFY; exec "$@"' sh "$script" "$test_dir/page.html"
-assert_exit 64 sh -c 'unset SCP_IDENTIFY; SCP_DESTINATION=root@example.test:/srv/public; SCP_PUBLIC_IP=203.0.113.10; export SCP_DESTINATION SCP_PUBLIC_IP; exec "$@"' sh "$script" "$test_dir/page.html"
 assert_exit 64 "$script" "$test_dir/page.html" "not-a-destination"
 assert_exit 64 "$script" "$test_dir/page.html" "root@example.test:/srv/public" "ftp://example.test/public"
 assert_exit 66 env SCP_PUBLIC_IP=203.0.113.10 "$script" "$test_dir/page.html" "root@example.test:/srv/public" "https://example.test/public" "$test_dir/missing-key"
@@ -67,7 +66,7 @@ fi
 
 mock_bin="$test_dir/bin"
 mkdir "$mock_bin"
-printf '%s\n' '#!/bin/sh' '[ "${SCP_FORBID:-}" != 1 ] || exit 99' '[ "$2" = "$SCP_IDENTIFY" ] || exit 1' 'case "$4" in "$SCP_DESTINATION"/page-*.html) exit 0 ;; *) exit 1 ;; esac' > "$mock_bin/scp"
+printf '%s\n' '#!/bin/sh' '[ "${SCP_FORBID:-}" != 1 ] || exit 99' 'if [ "$1" = "-i" ]; then [ "$2" = "$SCP_IDENTIFY" ] || exit 1; destination=$4; else destination=$2; fi' 'case "$destination" in "$SCP_DESTINATION"/page-*.html) exit 0 ;; *) exit 1 ;; esac' > "$mock_bin/scp"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$mock_bin/curl"
 chmod 755 "$mock_bin/scp" "$mock_bin/curl"
 touch "$test_dir/key"
@@ -75,6 +74,11 @@ scp_output=$(SCP_DESTINATION="root@example.test:/srv/public" SCP_IDENTIFY="$test
 scp_timestamp=${scp_output#https://bryanxu.top/public/page-}
 scp_timestamp=${scp_timestamp%.html}
 assert_millisecond_timestamp "$scp_timestamp"
+
+scp_without_identity_output=$(SCP_DESTINATION="root@example.test:/srv/public" SCP_IDENTIFY="$test_dir/key" PATH="$mock_bin:$PATH" "$script" "$test_dir/page.html" "" "" "")
+scp_without_identity_timestamp=${scp_without_identity_output#https://bryanxu.top/public/page-}
+scp_without_identity_timestamp=${scp_without_identity_timestamp%.html}
+assert_millisecond_timestamp "$scp_without_identity_timestamp"
 
 local_directory="$test_dir/local-public"
 mkdir "$local_directory"
