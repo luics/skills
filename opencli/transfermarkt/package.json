@@ -1,0 +1,8 @@
+{
+  "name": "opencli-plugin-transfermarkt",
+  "version": "0.1.0",
+  "type": "module",
+  "peerDependencies": {
+    "@jackwener/opencli": ">=1.8.8"
+  }
+}

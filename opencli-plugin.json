@@ -1,0 +1,13 @@
+{
+  "version": "0.1.0",
+  "opencli": ">=1.8.8",
+  "description": "Luics OpenCLI plugins",
+  "plugins": {
+    "transfermarkt": {
+      "path": "opencli/transfermarkt",
+      "description": "Transfermarkt player-ranking commands",
+      "version": "0.1.0",
+      "opencli": ">=1.8.8"
+    }
+  }
+}
