@@ -445,13 +445,17 @@ function descriptionForMarkdown(description) {
   return `${description.trim().split(/\s+/).slice(0, 140).join(" ")}…`;
 }
 
+function formatArticleDate(publishedAt) {
+  return `[${publishedAt.slice(5, 10).replace("-", ".")}]`;
+}
+
 function renderFetchMarkdown(result) {
   const lines = [];
   for (const feed of result.feeds) {
     if (feed.articles.length === 0) continue;
     lines.push(`## ${feed.name}`, "");
     for (const article of feed.articles) {
-      lines.push(`* [${article.publishedAt.slice(5, 10)}] [${article.title}](${article.url})`);
+      lines.push(`* ${formatArticleDate(article.publishedAt)} [${article.title}](${article.url})`);
       const description = descriptionForMarkdown(article.description);
       if (description) lines.push(`     * ${description}`);
     }
@@ -491,7 +495,7 @@ function renderFetchHtml(result) {
         <ul class="articles">
           ${feed.articles.map((article) => {
             const description = descriptionForMarkdown(article.description);
-            return `<li><time>${escapeHtml(article.publishedAt.slice(5, 10))}</time><a href="${safeHref(article.url)}">${escapeHtml(article.title)}</a>${description ? `<p>${escapeHtml(description)}</p>` : ""}</li>`;
+            return `<li><time>${escapeHtml(formatArticleDate(article.publishedAt))}</time><a href="${safeHref(article.url)}">${escapeHtml(article.title)}</a>${description ? `<p>${escapeHtml(description)}</p>` : ""}</li>`;
           }).join("\n")}
         </ul>
       </section>`)
@@ -509,7 +513,7 @@ function renderFetchHtml(result) {
     h2{margin:0;border-bottom:1px solid #263b57;padding-bottom:.35em;font-size:17px}
     .feed{margin:0 0 12px;background:#101b2e;border-left:3px solid #1f6feb;padding:8px}
     .articles{margin:8px 0 0;padding:0;list-style:none}.articles li{padding:8px 0;border-bottom:1px solid #263b57}.articles li:last-child{border:0;padding-bottom:0}
-    time{display:inline-block;min-width:42px;color:#7ee787;font-variant-numeric:tabular-nums}a{color:#79c0ff;text-decoration:none;font-weight:600}p{margin:4px 0 0;padding-left:8px;color:#aabbd1;font-size:13px}
+    time{display:inline-block;min-width:49px;color:#7ee787;font-variant-numeric:tabular-nums}a{color:#79c0ff;text-decoration:none;font-weight:600}p{margin:4px 0 0;padding-left:8px;color:#aabbd1;font-size:13px}
     .status,.empty{margin:0 0 12px;padding:8px;background:#101b2e;border-left:3px solid #f2cc60}.status h2{color:#f2cc60}.status ul{margin:8px 0 0;padding-left:12px;color:#cbd9eb}.empty{color:#aabbd1}
     .report-footer{box-sizing:border-box;position:relative;left:50%;width:100vw;margin:12px 0 0 -50vw;padding:8px max(6px,calc((100vw - 900px)/2 + 6px));background:#101b2e;color:#86a7cd;font-size:12px}
     @media(max-width:700px){.markdown-body{padding:6px 4px 0}.feed{padding:6px}.articles li{padding:7px 0}}

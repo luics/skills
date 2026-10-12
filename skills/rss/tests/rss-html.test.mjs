@@ -97,6 +97,8 @@ test("renders a compact HTML report from The Verge RSS feed", { timeout: 45_000 
   assert.match(stdout, /\.markdown-body\{max-width:900px;margin:auto;padding:8px 6px 0\}/);
   assert.match(stdout, /\.articles\{margin:8px 0 0;padding:0;list-style:none\}/);
   assert.match(stdout, /p\{margin:4px 0 0;padding-left:8px;/);
+  assert.match(stdout, /<time>\[\d{2}\.\d{2}\]<\/time><a href="https:\/\//);
+  assert.match(stdout, /min-width:49px;color:#7ee787/);
 
   const feedsAfterDryRun = JSON.parse(await readFile(feedsPath, "utf8"));
   assert.equal(feedsAfterDryRun[0].lastestArticleAt, "1970-01-01T00:00:00Z");
