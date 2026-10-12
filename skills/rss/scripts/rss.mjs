@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 
-const FEEDS_PATH = resolve(process.cwd(), "feeds.json");
+let FEEDS_PATH = resolve(process.cwd(), "feeds.json");
 const EPOCH = "1970-01-01T00:00:00Z";
 const DEFAULT_LIMIT = 10;
 
@@ -16,7 +16,7 @@ function usage() {
   return `RSS reader CLI
 
 Usage:
-  node scripts/rss.mjs [fetch] [scope ...] [--limit <count>] [--markdown|--html|--json]
+  node scripts/rss.mjs [--feeds <absolute-path>] [fetch] [scope ...] [--limit <count>] [--dry-run] [--markdown|--html|--json]
   node scripts/rss.mjs sendmail [scope ...]
   node scripts/rss.mjs feed list [--json]
   node scripts/rss.mjs feed add --id <id> --name <name> --url <rss-url>
@@ -59,6 +59,21 @@ function parseOptions(tokens) {
   }
 
   return { positionals, options };
+}
+
+function configureFeedsPath(arguments_) {
+  const remaining = [];
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const argument = arguments_[index];
+    if (argument !== "--feeds" && !argument.startsWith("--feeds=")) {
+      remaining.push(argument);
+      continue;
+    }
+    const value = argument === "--feeds" ? arguments_[++index] : argument.slice("--feeds=".length);
+    if (!value || value.startsWith("--")) fail("--feeds 需要一个路径。");
+    FEEDS_PATH = resolve(value);
+  }
+  return remaining;
 }
 
 function required(options, name) {
@@ -506,11 +521,12 @@ function renderFetchHtml(result) {
 async function fetchFeeds(arguments_) {
   const { positionals: scopes, options } = parseOptions(arguments_);
   const limit = parseLimit(options.get("limit"));
+  const dryRun = options.has("dry-run");
   const outputFlags = ["markdown", "html", "json"].filter((name) => options.has(name));
   if (outputFlags.length > 1) fail("--markdown、--html 与 --json 不能同时使用。");
   const feeds = await readFeeds();
   const { selected, disabled, unmatched } = selectFeeds(feeds, scopes);
-  const result = { feeds: [], disabled, unmatched, failures: [] };
+  const result = { feeds: [], disabled, unmatched, failures: [], dryRun };
   let changed = false;
 
   for (const feed of selected) {
@@ -531,7 +547,7 @@ async function fetchFeeds(arguments_) {
     }
   }
 
-  if (changed) await writeFeeds(feeds);
+  if (changed && !dryRun) await writeFeeds(feeds);
   if (options.has("json")) console.log(JSON.stringify(result, null, 2));
   else if (options.has("html")) console.log(renderFetchHtml(result));
   else console.log(renderFetchMarkdown(result));
@@ -540,7 +556,11 @@ async function fetchFeeds(arguments_) {
 
 async function sendMail(arguments_) {
   const mailer = fileURLToPath(new URL("./rss-mailer.mjs", import.meta.url));
-  const child = spawn(process.execPath, [mailer, ...arguments_], { cwd: process.cwd(), stdio: "inherit" });
+  const child = spawn(process.execPath, [mailer, ...arguments_], {
+    cwd: process.cwd(),
+    env: { ...process.env, RSS_FEEDS_PATH: FEEDS_PATH },
+    stdio: "inherit",
+  });
   const code = await new Promise((resolveCode, reject) => {
     child.once("error", reject);
     child.once("exit", resolveCode);
@@ -549,7 +569,7 @@ async function sendMail(arguments_) {
 }
 
 async function main() {
-  const arguments_ = process.argv.slice(2);
+  const arguments_ = configureFeedsPath(process.argv.slice(2));
   if (arguments_.includes("--help") || arguments_.includes("-h")) {
     console.log(usage());
     return;

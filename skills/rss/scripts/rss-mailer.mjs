@@ -13,6 +13,7 @@ const sender = process.env.MAIL_FROM ?? "luicsxu@163.com";
 const timeZone = process.env.REPORT_TIMEZONE ?? "Asia/Shanghai";
 const subjectPrefix = process.env.MAIL_SUBJECT_PREFIX ?? "RSS 阅读器";
 const dryRun = /^(1|true|yes)$/i.test(process.env.DRY_RUN ?? "");
+const feedsPath = process.env.RSS_FEEDS_PATH?.trim();
 
 function timestamp() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -29,7 +30,9 @@ function timestamp() {
 }
 
 async function fetchHtml(scopes) {
-  const child = spawn(nodeExecutable, [rssCli, "fetch", ...scopes, "--html"], {
+  const arguments_ = [rssCli, "fetch", ...scopes, "--html"];
+  if (feedsPath) arguments_.push("--feeds", feedsPath);
+  const child = spawn(nodeExecutable, arguments_, {
     cwd: projectDir,
     stdio: ["ignore", "pipe", "pipe"],
   });
