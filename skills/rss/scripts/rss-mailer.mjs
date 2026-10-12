@@ -53,16 +53,19 @@ async function fetchHtml(scopes) {
 }
 
 async function sendMail(html, subject) {
+  const encodedSubject = encodeMimeHeader(subject);
+  const encodedHtml = Buffer.from(html, "utf8").toString("base64").match(/.{1,76}/g)?.join("\r\n") ?? "";
   const message = [
     `To: ${recipient}`,
     `From: ${sender}`,
-    `Subject: ${subject}`,
+    `Subject: ${encodedSubject}`,
     "MIME-Version: 1.0",
     "Content-Type: text/html; charset=UTF-8",
-    "Content-Transfer-Encoding: 8bit",
+    "Content-Transfer-Encoding: base64",
     "",
-    html,
-  ].join("\n");
+    encodedHtml,
+    "",
+  ].join("\r\n");
   const child = spawn("/usr/sbin/sendmail", ["-f", sender, "-t", "-oi"], {
     stdio: ["pipe", "inherit", "inherit"],
   });
@@ -71,6 +74,11 @@ async function sendMail(html, subject) {
     child.once("error", reject);
     child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`sendmail exited with code ${code}`)));
   });
+}
+
+function encodeMimeHeader(value) {
+  if (/^[\x20-\x7e]*$/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
 }
 
 async function main() {
@@ -85,7 +93,7 @@ async function main() {
     return;
   }
   await sendMail(html, subject);
-  console.log(`Sent RSS email to ${recipient}.`);
+  console.log(`Queued RSS email for ${recipient}.`);
 }
 
 main().catch((error) => {
