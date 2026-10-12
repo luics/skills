@@ -14,6 +14,7 @@ const timeZone = process.env.REPORT_TIMEZONE ?? "Asia/Shanghai";
 const subjectPrefix = process.env.MAIL_SUBJECT_PREFIX ?? "RSS 阅读器";
 const dryRun = /^(1|true|yes)$/i.test(process.env.DRY_RUN ?? "");
 const feedsPath = process.env.RSS_FEEDS_PATH?.trim();
+const sendmailExecutable = process.env.SENDMAIL_PATH ?? "/usr/sbin/sendmail";
 
 function timestamp() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -66,7 +67,7 @@ async function sendMail(html, subject) {
     encodedHtml,
     "",
   ].join("\r\n");
-  const child = spawn("/usr/sbin/sendmail", ["-f", sender, "-t", "-oi"], {
+  const child = spawn(sendmailExecutable, ["-f", sender, "-t", "-oi"], {
     stdio: ["pipe", "inherit", "inherit"],
   });
   child.stdin.end(message);
@@ -96,7 +97,11 @@ async function main() {
   console.log(`Queued RSS email for ${recipient}.`);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+
+export { encodeMimeHeader };

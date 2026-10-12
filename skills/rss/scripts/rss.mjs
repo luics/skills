@@ -505,17 +505,17 @@ function renderFetchHtml(result) {
   const content = sections || "<section class=\"empty\"><p>没有新文章。</p></section>";
   const css = `
     body{margin:0;background:#0b1220;color:#dce9fb;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
-    .markdown-body{max-width:900px;margin:auto;padding:20px 16px 0}
-    h1,h2{margin:0;border-bottom:1px solid #263b57;padding-bottom:.35em}h1{font-size:23px}h2{font-size:17px}
-    .subtitle{margin:7px 0 22px;color:#86a7cd}.feed{margin:0 0 24px;background:#101b2e;border-left:3px solid #1f6feb;padding:14px 16px}
-    .articles{margin:12px 0 0;padding:0;list-style:none}.articles li{padding:10px 0;border-bottom:1px solid #263b57}.articles li:last-child{border:0;padding-bottom:0}
-    time{display:inline-block;min-width:42px;color:#7ee787;font-variant-numeric:tabular-nums}a{color:#79c0ff;text-decoration:none;font-weight:600}p{margin:4px 0 0;padding-left:42px;color:#aabbd1;font-size:13px}
-    .status,.empty{margin:0 0 24px;padding:14px 16px;background:#101b2e;border-left:3px solid #f2cc60}.status h2{color:#f2cc60}.status ul{margin:10px 0 0;padding-left:20px;color:#cbd9eb}.empty{color:#aabbd1}
-    .report-footer{box-sizing:border-box;position:relative;left:50%;width:100vw;margin:24px 0 0 -50vw;padding:12px max(16px,calc((100vw - 900px)/2 + 16px));background:#101b2e;color:#86a7cd;font-size:12px}
-    @media(max-width:700px){.markdown-body{padding:14px 10px 0}.feed{padding:12px}.articles li{padding:9px 0}h1{font-size:21px}}
+    .markdown-body{max-width:900px;margin:auto;padding:8px 6px 0}
+    h2{margin:0;border-bottom:1px solid #263b57;padding-bottom:.35em;font-size:17px}
+    .feed{margin:0 0 12px;background:#101b2e;border-left:3px solid #1f6feb;padding:8px}
+    .articles{margin:8px 0 0;padding:0;list-style:none}.articles li{padding:8px 0;border-bottom:1px solid #263b57}.articles li:last-child{border:0;padding-bottom:0}
+    time{display:inline-block;min-width:42px;color:#7ee787;font-variant-numeric:tabular-nums}a{color:#79c0ff;text-decoration:none;font-weight:600}p{margin:4px 0 0;padding-left:8px;color:#aabbd1;font-size:13px}
+    .status,.empty{margin:0 0 12px;padding:8px;background:#101b2e;border-left:3px solid #f2cc60}.status h2{color:#f2cc60}.status ul{margin:8px 0 0;padding-left:12px;color:#cbd9eb}.empty{color:#aabbd1}
+    .report-footer{box-sizing:border-box;position:relative;left:50%;width:100vw;margin:12px 0 0 -50vw;padding:8px max(6px,calc((100vw - 900px)/2 + 6px));background:#101b2e;color:#86a7cd;font-size:12px}
+    @media(max-width:700px){.markdown-body{padding:6px 4px 0}.feed{padding:6px}.articles li{padding:7px 0}}
   `;
   const timestamp = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", dateStyle: "medium", timeStyle: "short", hourCycle: "h23" }).format(new Date());
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body><main class="markdown-body"><h1>RSS 最新文章</h1><p class="subtitle">按订阅源分组的本次抓取结果</p>${content}${statusHtml}</main><footer class="report-footer">获取时间：${escapeHtml(timestamp)}（Asia/Shanghai）</footer></body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body><main class="markdown-body">${content}${statusHtml}</main><footer class="report-footer">获取时间：${escapeHtml(timestamp)}（Asia/Shanghai）</footer></body></html>`;
 }
 
 async function fetchFeeds(arguments_) {
