@@ -7,6 +7,7 @@ import https from "node:https";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
+import { logInfo, logError } from "./logger.mjs";
 
 let FEEDS_PATH = resolve(process.cwd(), "feeds.json");
 const EPOCH = "1970-01-01T00:00:00Z";
@@ -170,7 +171,7 @@ function printFeeds(feeds, asJson) {
     return;
   }
   if (feeds.length === 0) {
-    console.log("没有已配置的 feed。");
+    logInfo("没有已配置的 feed。");
     return;
   }
   console.log("| ID | 名称 | RSS/Atom URL | 最新文章时间 (UTC) | 状态 |\n| --- | --- | --- | --- | --- |");
@@ -199,7 +200,7 @@ async function manageFeeds(arguments_) {
     assertUnique(feeds, "url", url);
     feeds.push({ id, name, url, lastestArticleAt: EPOCH, disabled: false });
     await writeFeeds(feeds);
-    console.log(`已添加 feed：${name}（${id}）。`);
+    logInfo(`已添加 feed：${name}（${id}）。`);
     return;
   }
 
@@ -225,7 +226,7 @@ async function manageFeeds(arguments_) {
     if (timestamp) feed.lastestArticleAt = normalizeTimestamp(timestamp);
     if (disabled !== undefined) feed.disabled = disabled;
     await writeFeeds(feeds);
-    console.log(`已更新 feed：${feed.name}（${feed.id}）。`);
+    logInfo(`已更新 feed：${feed.name}（${feed.id}）。`);
     return;
   }
 
@@ -234,7 +235,7 @@ async function manageFeeds(arguments_) {
     if (options.get("confirm") !== true) fail("删除 feed 需要明确确认：--confirm。");
     const feed = findExactFeed(feeds, positionals[0]);
     await writeFeeds(feeds.filter((candidate) => candidate !== feed));
-    console.log(`已删除 feed：${feed.name}（${feed.id}）。`);
+    logInfo(`已删除 feed：${feed.name}（${feed.id}）。`);
     return;
   }
 
@@ -589,7 +590,11 @@ async function main() {
   await fetchFeeds(arguments_[0] === "fetch" ? arguments_.slice(1) : arguments_);
 }
 
-main().catch((error) => {
-  console.error(`错误：${error.message}`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    logError(`错误：${error.message}`);
+    process.exitCode = 1;
+  });
+}
+
+export { renderFetchHtml };

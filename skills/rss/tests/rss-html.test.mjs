@@ -9,7 +9,7 @@ import test from "node:test";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
-import { encodeMimeHeader } from "../scripts/rss-mailer.mjs";
+import { encodeMimeHeader, parseTranslation } from "../scripts/rss-mailer.mjs";
 
 const execFileAsync = promisify(execFile);
 const skillDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -67,6 +67,33 @@ process.stdin.on("data", (chunk) => chunks.push(chunk));
 process.stdin.on("end", () => {
   if (process.env.CAPTURE_FILE) writeFileSync(process.env.CAPTURE_FILE, Buffer.concat(chunks));
   process.exit(Number(process.env.SENDMAIL_EXIT || 0));
+});
+`);
+  await chmod(executable, 0o755);
+  return executable;
+}
+
+async function writeFakeCodex(workspace) {
+  const executable = path.join(workspace, "fake-codex.mjs");
+  await writeFile(executable, `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+const chunks = [];
+process.stdin.on("data", (chunk) => chunks.push(chunk));
+process.stdin.on("end", () => {
+  const prompt = Buffer.concat(chunks).toString("utf8");
+  if (process.env.CODEX_CAPTURE_FILE) appendFileSync(process.env.CODEX_CAPTURE_FILE, JSON.stringify({ args: process.argv.slice(2), prompt }) + "\\n");
+  if (Number(process.env.CODEX_EXIT || 0) !== 0) {
+    console.error("fake Codex failure");
+    process.exit(Number(process.env.CODEX_EXIT));
+  }
+  if (process.env.CODEX_OUTPUT !== undefined) process.stdout.write(process.env.CODEX_OUTPUT);
+  else {
+    const source = JSON.parse(prompt.slice(prompt.lastIndexOf("\\n") + 1));
+    process.stdout.write(JSON.stringify({
+      name: \`中文 \${source.name}\`,
+      articles: source.articles.map((article) => ({ title: \`中文 \${article.title}\`, description: article.description ? \`中文 \${article.description}\` : "" })),
+    }));
+  }
 });
 `);
   await chmod(executable, 0o755);
@@ -354,10 +381,11 @@ test("encodes non-ASCII mail subjects and lets the mailer dry-run with RSS_FEEDS
     url: fixture.url("/rss.xml"),
     lastestArticleAt: "1970-01-01T00:00:00Z",
   }]);
+  const fakeCodex = await writeFakeCodex(workspace);
 
   const { stdout } = await execFileAsync(process.execPath, [rssMailer], {
     cwd: workspace,
-    env: { ...process.env, DRY_RUN: "1", RSS_FEEDS_PATH: feedsPath, MAIL_TO: "test@example.com" },
+    env: { ...process.env, DRY_RUN: "1", RSS_FEEDS_PATH: feedsPath, MAIL_TO: "test@example.com", CODEX_EXECUTABLE: fakeCodex },
   });
   assert.match(stdout, /Dry run: generated RSS email for test@example.com without sending/);
 });
@@ -506,6 +534,7 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
     lastestArticleAt: "1970-01-01T00:00:00Z",
   }]);
   const fakeSendmail = await writeFakeSendmail(workspace);
+  const fakeCodex = await writeFakeCodex(workspace);
   const capturedMessage = path.join(workspace, "message.eml");
   const environment = {
     ...process.env,
@@ -513,6 +542,7 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
     MAIL_TO: "test@example.com",
     MAIL_SUBJECT_PREFIX: "RSS 阅读器",
     SENDMAIL_PATH: fakeSendmail,
+    CODEX_EXECUTABLE: fakeCodex,
     CAPTURE_FILE: capturedMessage,
   };
 
@@ -522,10 +552,93 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
   assert.match(message, /Subject: =\?UTF-8\?B\?/);
   assert.match(message, /Content-Transfer-Encoding: base64/);
   const encodedHtml = message.split("\r\n\r\n")[1].replaceAll("\r\n", "").trim();
-  assert.match(Buffer.from(encodedHtml, "base64").toString("utf8"), /<!doctype html>/i);
+  const html = Buffer.from(encodedHtml, "base64").toString("utf8");
+  assert.match(html, /<!doctype html>/i);
+  assert.match(html, /中文 Article/);
 
+  await rm(capturedMessage);
+  const capturedPrompts = path.join(workspace, "empty-prompts.jsonl");
+  const skipped = await execFileAsync(process.execPath, [rssCli, "sendmail"], {
+    cwd: workspace,
+    env: { ...environment, DRY_RUN: "0", CODEX_CAPTURE_FILE: capturedPrompts },
+  });
+  assert.match(skipped.stdout, /新文章为 0，跳过邮件发送/);
+  await assert.rejects(readFile(capturedMessage), { code: "ENOENT" });
+  await assert.rejects(readFile(capturedPrompts), { code: "ENOENT" });
+
+  await runRss(["feed", "update", "mailer", "--lastest-article-at", "1970-01-01T00:00:00Z"], workspace);
   await assert.rejects(
     execFileAsync(process.execPath, [rssMailer], { cwd: workspace, env: { ...environment, SENDMAIL_EXIT: "2" } }),
     (error) => error.code === 1 && /sendmail exited with code 2/.test(error.stderr),
   );
+});
+
+test("translates every fetched feed from JSON before mail HTML rendering", async (t) => {
+  const fixture = await startFixtureServer(t, {
+    "/one.xml": { body: rssDocument([rssItem({ title: "One", url: "https://example.com/one", description: "First", publishedAt: "Mon, 01 Jan 2024 00:00:00 GMT" })]) },
+    "/two.xml": { body: rssDocument([rssItem({ title: "Two", url: "https://example.com/two", description: "Second", publishedAt: "Tue, 02 Jan 2024 00:00:00 GMT" })]) },
+  });
+  const { workspace, feedsPath } = await createWorkspace(t, [
+    { id: "one", name: "One feed", url: fixture.url("/one.xml"), lastestArticleAt: "1970-01-01T00:00:00Z" },
+    { id: "two", name: "Two feed", url: fixture.url("/two.xml"), lastestArticleAt: "1970-01-01T00:00:00Z" },
+  ]);
+  const fakeSendmail = await writeFakeSendmail(workspace);
+  const fakeCodex = await writeFakeCodex(workspace);
+  const capturedMail = path.join(workspace, "message.eml");
+  const capturedPrompts = path.join(workspace, "codex-prompts.jsonl");
+  await execFileAsync(process.execPath, [rssMailer], {
+    cwd: workspace,
+    env: {
+      ...process.env, RSS_FEEDS_PATH: feedsPath, SENDMAIL_PATH: fakeSendmail, CODEX_EXECUTABLE: fakeCodex,
+      MAIL_TO: "test@example.com", CAPTURE_FILE: capturedMail, CODEX_CAPTURE_FILE: capturedPrompts,
+    },
+  });
+  const prompts = (await readFile(capturedPrompts, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(prompts.length, 2);
+  assert.deepEqual(prompts.map(({ args }) => args), [
+    ["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--model", "gpt-6-luna", "--config", 'model_reasoning_effort="none"', "-"],
+    ["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--model", "gpt-6-luna", "--config", 'model_reasoning_effort="none"', "-"],
+  ]);
+  assert.match(prompts[0].prompt, /"id":"one"/);
+  assert.match(prompts[1].prompt, /"id":"two"/);
+  const message = await readFile(capturedMail, "utf8");
+  const html = Buffer.from(message.split("\r\n\r\n")[1].replaceAll("\r\n", "").trim(), "base64").toString("utf8");
+  assert.match(html, /中文 One feed/);
+  assert.match(html, /中文 Two/);
+});
+
+test("keeps original feed text when Codex fails or returns invalid translations", async (t) => {
+  const fixture = await startFixtureServer(t, {
+    "/rss.xml": { body: rssDocument([rssItem({ title: "Original title", url: "https://example.com/original", description: "Original description", publishedAt: "Mon, 01 Jan 2024 00:00:00 GMT" })]) },
+  });
+  for (const [name, codexEnvironment] of [
+    ["non-zero exit", { CODEX_EXIT: "2" }],
+    ["invalid JSON", { CODEX_OUTPUT: "not JSON" }],
+    ["invalid schema", { CODEX_OUTPUT: '{"name":"Translated","articles":[]}' }],
+  ]) {
+    await t.test(name, async (t) => {
+      const { workspace, feedsPath } = await createWorkspace(t, [{ id: "fallback", name: "Original feed", url: fixture.url("/rss.xml"), lastestArticleAt: "1970-01-01T00:00:00Z" }]);
+      const fakeSendmail = await writeFakeSendmail(workspace);
+      const fakeCodex = await writeFakeCodex(workspace);
+      const capturedMail = path.join(workspace, "message.eml");
+      const { stderr } = await execFileAsync(process.execPath, [rssMailer], {
+        cwd: workspace,
+        env: { ...process.env, ...codexEnvironment, RSS_FEEDS_PATH: feedsPath, SENDMAIL_PATH: fakeSendmail, CODEX_EXECUTABLE: fakeCodex, MAIL_TO: "test@example.com", CAPTURE_FILE: capturedMail },
+      });
+      assert.match(stderr, /翻译失败，保留原文：Original feed/);
+      const message = await readFile(capturedMail, "utf8");
+      const html = Buffer.from(message.split("\r\n\r\n")[1].replaceAll("\r\n", "").trim(), "base64").toString("utf8");
+      assert.match(html, /Original title/);
+      assert.match(html, /Original description/);
+    });
+  }
+});
+
+test("validates Codex translation shape without accepting lost or incomplete articles", () => {
+  const source = { name: "Source", articles: [{ title: "One", description: "Description" }] };
+  assert.deepEqual(parseTranslation('{"name":"中文","articles":[{"title":"标题","description":"摘要"}]}', source), {
+    name: "中文", articles: [{ title: "标题", description: "摘要" }],
+  });
+  assert.throws(() => parseTranslation('{"name":"中文","articles":[]}', source), /结构不符合预期/);
+  assert.throws(() => parseTranslation('{"name":"中文","articles":[{"title":"","description":"摘要"}]}', source), /文章翻译不符合预期/);
 });
