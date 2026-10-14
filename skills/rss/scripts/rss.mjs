@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 import { logInfo, logError } from "./logger.mjs";
+import { startStage } from "./timing.mjs";
 
 let FEEDS_PATH = resolve(process.cwd(), "feeds.json");
 const EPOCH = "1970-01-01T00:00:00Z";
@@ -18,7 +19,7 @@ function usage() {
 
 Usage:
   node scripts/rss.mjs [--feeds <absolute-path>] [fetch] [scope ...] [--limit <count>] [--dry-run] [--markdown|--html|--json]
-  node scripts/rss.mjs sendmail [scope ...]
+  node scripts/rss.mjs sendmail [scope ...] [--debug[=true|false]|--no-debug]
   node scripts/rss.mjs feed list [--json]
   node scripts/rss.mjs feed add --id <id> --name <name> --url <rss-url>
   node scripts/rss.mjs feed update <id|url> [--id <id>] [--name <name>] [--url <rss-url>] [--lastest-article-at <iso-utc>] [--disabled <true|false>]
@@ -487,7 +488,7 @@ function safeHref(value) {
   }
 }
 
-function renderFetchHtml(result) {
+function renderFetchHtml(result, debugStatus = []) {
   const sections = result.feeds
     .filter((feed) => feed.articles.length > 0)
     .map((feed) => `
@@ -506,6 +507,7 @@ function renderFetchHtml(result) {
     ...result.disabled.map((feed) => `已禁用，未抓取：${feed.name}`),
     ...result.failures.map((failure) => `抓取失败：${failure.name} — ${failure.error}`),
   ];
+  status.push(...debugStatus);
   const statusHtml = status.length ? `<section class="status"><h2>状态</h2><ul>${status.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>` : "";
   const content = sections || "<section class=\"empty\"><p>没有新文章。</p></section>";
   const css = `
@@ -532,9 +534,11 @@ async function fetchFeeds(arguments_) {
   const feeds = await readFeeds();
   const { selected, disabled, unmatched } = selectFeeds(feeds, scopes);
   const result = { feeds: [], disabled, unmatched, failures: [], dryRun };
+  if (process.env.RSS_RUN_ID) result.timings = [];
   let changed = false;
 
   for (const feed of selected) {
+    const finish = startStage(process.env.RSS_RUN_ID, "fetch_feed", { feed_id: feed.id });
     try {
       const entries = await getFeedEntries(feed);
       const cursor = Date.parse(feed.lastestArticleAt || EPOCH);
@@ -546,9 +550,13 @@ async function fetchFeeds(arguments_) {
         changed = true;
       }
       result.feeds.push({ id: feed.id, name: feed.name, articles: newer.slice(0, limit), newCount: newer.length });
+      const timing = finish("ok", { new_articles: newer.length, report_articles: Math.min(newer.length, limit) });
+      if (timing) result.timings.push(timing);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result.failures.push({ id: feed.id, name: feed.name, error: message });
+      const timing = finish(error.code === "ETIMEDOUT" ? "timeout" : "error");
+      if (timing) result.timings.push(timing);
     }
   }
 

@@ -9,13 +9,32 @@ import test from "node:test";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
-import { encodeMimeHeader, parseTranslation } from "../scripts/rss-mailer.mjs";
+import { encodeMimeHeader, parseTranslation, parseMailerOptions, summarizeTimings } from "../scripts/rss-mailer.mjs";
+import { renderFetchHtml } from "../scripts/rss.mjs";
 
 const execFileAsync = promisify(execFile);
 const skillDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rssCli = path.join(skillDir, "scripts", "rss.mjs");
 const rssMailer = path.join(skillDir, "scripts", "rss-mailer.mjs");
 const vergeFeedUrl = "https://www.theverge.com/rss/index.xml";
+
+function timingEvents(stderr) {
+  const lines = stderr.split("\n").filter((line) => / run_id=.* stage=/.test(line));
+  const events = lines.map((line) => {
+    assert.match(line, /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]/);
+    return Object.fromEntries([...line.matchAll(/(\w+)=([^ ]+)/g)].map((match) => [match[1], match[2]]));
+  });
+  assert.ok(events.length > 0);
+  assert.equal(new Set(events.map((event) => event.run_id)).size, 1);
+  const starts = events.filter((event) => event.event === "start");
+  const ends = events.filter((event) => event.event === "end");
+  assert.equal(starts.length, ends.length);
+  for (const end of ends) {
+    assert.match(end.duration_ms, /^\d+\.\d$/);
+    assert.equal(starts.filter((start) => start.stage === end.stage && start.feed_id === end.feed_id).length, 1);
+  }
+  return ends;
+}
 
 async function createWorkspace(t, feeds) {
   const workspace = await mkdtemp(path.join(tmpdir(), "rss-skill-test-"));
@@ -81,6 +100,7 @@ const chunks = [];
 process.stdin.on("data", (chunk) => chunks.push(chunk));
 process.stdin.on("end", () => {
   const prompt = Buffer.concat(chunks).toString("utf8");
+  if (process.env.CODEX_HANG === "1") { setInterval(() => {}, 1000); return; }
   if (process.env.CODEX_CAPTURE_FILE) appendFileSync(process.env.CODEX_CAPTURE_FILE, JSON.stringify({ args: process.argv.slice(2), prompt }) + "\\n");
   if (Number(process.env.CODEX_EXIT || 0) !== 0) {
     console.error("fake Codex failure");
@@ -383,11 +403,27 @@ test("encodes non-ASCII mail subjects and lets the mailer dry-run with RSS_FEEDS
   }]);
   const fakeCodex = await writeFakeCodex(workspace);
 
-  const { stdout } = await execFileAsync(process.execPath, [rssMailer], {
+  const { stdout, stderr } = await execFileAsync(process.execPath, [rssMailer], {
     cwd: workspace,
     env: { ...process.env, DRY_RUN: "1", RSS_FEEDS_PATH: feedsPath, MAIL_TO: "test@example.com", CODEX_EXECUTABLE: fakeCodex },
   });
   assert.match(stdout, /Dry run: generated RSS email for test@example.com without sending/);
+  const events = timingEvents(stderr);
+  assert.equal(events.at(-1).outcome, "dry_run");
+  assert.ok(events.every((event) => event.stage !== "sendmail"));
+});
+
+test("records feed and total failure timings without translating or sending", async (t) => {
+  const fixture = await startFixtureServer(t, { "/bad.xml": { status: 500, body: "unavailable" } });
+  const { workspace } = await createWorkspace(t, [{ id: "bad", name: "Bad feed", url: fixture.url("/bad.xml") }]);
+  await assert.rejects(execFileAsync(process.execPath, [rssCli, "sendmail"], { cwd: workspace }), (error) => {
+    const events = timingEvents(error.stderr);
+    assert.deepEqual(events.map((event) => event.stage), ["fetch_feed", "fetch", "total"]);
+    assert.ok(events.every((event) => event.status === "error"));
+    assert.equal(events.at(-1).outcome, "failed");
+    assert.equal(events.at(-1).fetch_failures, "1");
+    return error.code === 1;
+  });
 });
 
 test("keeps failed-feed cursors while advancing successful feeds in a mixed run", async (t) => {
@@ -548,6 +584,12 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
 
   const sent = await execFileAsync(process.execPath, [rssMailer], { cwd: workspace, env: environment });
   assert.match(sent.stdout, /Queued RSS email for test@example.com/);
+  const sentEvents = timingEvents(sent.stderr);
+  assert.deepEqual(sentEvents.map((event) => event.stage), ["fetch_feed", "fetch", "translate_feed", "translate", "render", "sendmail", "total"]);
+  assert.ok(sentEvents.every((event) => event.status === "ok"));
+  assert.equal(sentEvents.at(-1).outcome, "queued");
+  assert.equal(sentEvents.at(-1).new_articles, "1");
+  assert.equal(sentEvents.at(-1).report_articles, "1");
   const message = await readFile(capturedMessage, "utf8");
   assert.match(message, /Subject: =\?UTF-8\?B\?/);
   assert.match(message, /Content-Transfer-Encoding: base64/);
@@ -555,6 +597,10 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
   const html = Buffer.from(encodedHtml, "base64").toString("utf8");
   assert.match(html, /<!doctype html>/i);
   assert.match(html, /中文 Article/);
+  assert.match(html, /<h2>状态<\/h2>/);
+  assert.match(html, /总耗时（截至邮件生成）/);
+  assert.match(html, /订阅源 Mailer fixture（mailer）：拉取/);
+  assert.match(html, /耗时热点/);
 
   await rm(capturedMessage);
   const capturedPrompts = path.join(workspace, "empty-prompts.jsonl");
@@ -563,13 +609,28 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
     env: { ...environment, DRY_RUN: "0", CODEX_CAPTURE_FILE: capturedPrompts },
   });
   assert.match(skipped.stdout, /新文章为 0，跳过邮件发送/);
+  const skippedEvents = timingEvents(skipped.stderr);
+  assert.deepEqual(skippedEvents.map((event) => event.stage), ["fetch_feed", "fetch", "total"]);
+  assert.equal(skippedEvents.at(-1).outcome, "no_new_articles");
   await assert.rejects(readFile(capturedMessage), { code: "ENOENT" });
   await assert.rejects(readFile(capturedPrompts), { code: "ENOENT" });
 
   await runRss(["feed", "update", "mailer", "--lastest-article-at", "1970-01-01T00:00:00Z"], workspace);
+  const noDebug = await execFileAsync(process.execPath, [rssCli, "sendmail", "--debug=false"], { cwd: workspace, env: environment });
+  assert.equal(timingEvents(noDebug.stderr).at(-1).outcome, "queued");
+  const plainMail = await readFile(capturedMessage, "utf8");
+  const plainHtml = Buffer.from(plainMail.split("\r\n\r\n")[1].replaceAll("\r\n", "").trim(), "base64").toString("utf8");
+  assert.doesNotMatch(plainHtml, /日志总结|耗时热点|总耗时（截至邮件生成）/);
+
+  await runRss(["feed", "update", "mailer", "--lastest-article-at", "1970-01-01T00:00:00Z"], workspace);
   await assert.rejects(
     execFileAsync(process.execPath, [rssMailer], { cwd: workspace, env: { ...environment, SENDMAIL_EXIT: "2" } }),
-    (error) => error.code === 1 && /sendmail exited with code 2/.test(error.stderr),
+    (error) => {
+      const events = timingEvents(error.stderr);
+      assert.equal(events.find((event) => event.stage === "sendmail").status, "error");
+      assert.equal(events.at(-1).outcome, "failed");
+      return error.code === 1 && /sendmail exited with code 2/.test(error.stderr);
+    },
   );
 });
 
@@ -615,6 +676,7 @@ test("keeps original feed text when Codex fails or returns invalid translations"
     ["non-zero exit", { CODEX_EXIT: "2" }],
     ["invalid JSON", { CODEX_OUTPUT: "not JSON" }],
     ["invalid schema", { CODEX_OUTPUT: '{"name":"Translated","articles":[]}' }],
+    ["timeout", { CODEX_HANG: "1", CODEX_TRANSLATION_TIMEOUT_MS: "200" }],
   ]) {
     await t.test(name, async (t) => {
       const { workspace, feedsPath } = await createWorkspace(t, [{ id: "fallback", name: "Original feed", url: fixture.url("/rss.xml"), lastestArticleAt: "1970-01-01T00:00:00Z" }]);
@@ -626,12 +688,53 @@ test("keeps original feed text when Codex fails or returns invalid translations"
         env: { ...process.env, ...codexEnvironment, RSS_FEEDS_PATH: feedsPath, SENDMAIL_PATH: fakeSendmail, CODEX_EXECUTABLE: fakeCodex, MAIL_TO: "test@example.com", CAPTURE_FILE: capturedMail },
       });
       assert.match(stderr, /翻译失败，保留原文：Original feed/);
+      const events = timingEvents(stderr);
+      assert.equal(events.find((event) => event.stage === "translate_feed").status, name === "timeout" ? "timeout" : "error");
+      assert.equal(events.find((event) => event.stage === "translate").status, "partial");
+      assert.equal(events.at(-1).translation_fallbacks, "1");
+      assert.equal(events.at(-1).outcome, "queued");
       const message = await readFile(capturedMail, "utf8");
       const html = Buffer.from(message.split("\r\n\r\n")[1].replaceAll("\r\n", "").trim(), "base64").toString("utf8");
       assert.match(html, /Original title/);
       assert.match(html, /Original description/);
+      assert.match(html, /翻译回退原文 1 个源/);
     });
   }
+});
+
+test("debug options default on and do not leak into feed scopes", () => {
+  assert.deepEqual(parseMailerOptions(["verge"]), { scopes: ["verge"], debug: true });
+  for (const flags of [["--debug=false"], ["--debug", "false"], ["--no-debug"]]) {
+    assert.deepEqual(parseMailerOptions([...flags, "verge"]), { scopes: ["verge"], debug: false });
+  }
+  assert.deepEqual(parseMailerOptions(["--debug", "verge"]), { scopes: ["verge"], debug: true });
+  assert.throws(() => parseMailerOptions(["--debug=invalid"]), /true 或 false/);
+});
+
+test("debug summary derives hotspots from timings and escapes source names", () => {
+  const result = {
+    feeds: [{ id: "one", name: "<script>source</script>", articles: [] }],
+    failures: [{ id: "bad", name: "Bad source", error: "unavailable" }],
+    disabled: [], unmatched: [],
+  };
+  const events = [
+    { stage: "fetch", duration_ms: 200 },
+    { stage: "translate", duration_ms: 700 },
+    { stage: "render", duration_ms: 10 },
+    { stage: "fetch_feed", feed_id: "one", duration_ms: 100, status: "ok" },
+    { stage: "fetch_feed", feed_id: "bad", duration_ms: 50, status: "error" },
+    { stage: "translate_feed", feed_id: "one", duration_ms: 690, status: "timeout" },
+  ];
+  const summary = summarizeTimings(result, events, { new_articles: 2, report_articles: 1, fetch_failures: 1, translation_fallbacks: 1 }, 1000, "test-run");
+  const html = renderFetchHtml(result, summary);
+  assert.match(html, /总耗时（截至邮件生成）：1.000 秒/);
+  assert.match(html, /翻译最耗时（0.700 秒，约占截至邮件生成总耗时的 70.0%）/);
+  assert.match(html, /累计 0.790 秒；翻译超时，保留原文/);
+  assert.match(html, /Bad source（bad）：拉取 0.050 秒；翻译 未执行/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(renderFetchHtml(result), /抓取失败：Bad source/);
+  assert.doesNotMatch(renderFetchHtml(result), /日志总结/);
 });
 
 test("validates Codex translation shape without accepting lost or incomplete articles", () => {

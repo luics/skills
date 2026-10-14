@@ -4,8 +4,11 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { renderFetchHtml } from "./rss.mjs";
 import { logInfo, logWarn, logError } from "./logger.mjs";
+import { startStage, measureStage, collectTimings } from "./timing.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = process.cwd();
@@ -44,21 +47,23 @@ function parseTimeout(value) {
   return Number(value);
 }
 
-async function fetchJson(scopes) {
+async function fetchJson(scopes, runId) {
   const arguments_ = [rssCli, "fetch", ...scopes, "--json"];
   if (feedsPath) arguments_.push("--feeds", feedsPath);
   const child = spawn(nodeExecutable, arguments_, {
     cwd: projectDir,
+    env: { ...process.env, RSS_RUN_ID: runId },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout = [];
   const stderr = [];
   child.stdout.on("data", (chunk) => stdout.push(chunk));
   child.stderr.on("data", (chunk) => stderr.push(chunk));
+  createInterface({ input: child.stderr, crlfDelay: Infinity }).on("line", logWarn);
 
   const code = await new Promise((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", resolve);
+    child.once("close", resolve);
   });
   const output = Buffer.concat(stdout).toString("utf8").trim();
   if (!output) {
@@ -137,7 +142,7 @@ function runCodex(prompt) {
     child.once("exit", (code, signal) => {
       clearTimeout(timer);
       if (timedOut) {
-        reject(new Error(`Codex 翻译超时（${translationTimeoutMs}ms）。`));
+        reject(Object.assign(new Error(`Codex 翻译超时（${translationTimeoutMs}ms）。`), { code: "ETIMEDOUT" }));
         return;
       }
       if (code !== 0) {
@@ -151,13 +156,14 @@ function runCodex(prompt) {
   });
 }
 
-async function translateResult(result) {
+async function translateResult(result, runId, metrics = { translation_fallbacks: 0 }) {
   const translated = {
     ...result,
     feeds: result.feeds.map((feed) => ({ ...feed, articles: feed.articles.map((article) => ({ ...article })) })),
   };
   for (let index = 0; index < result.feeds.length; index += 1) {
     const source = result.feeds[index];
+    const finish = startStage(runId, "translate_feed", { feed_id: source.id, articles: source.articles.length });
     try {
       const translation = parseTranslation(await runCodex(translationPrompt(source)), source);
       translated.feeds[index] = {
@@ -169,7 +175,10 @@ async function translateResult(result) {
           description: translation.articles[articleIndex].description,
         })),
       };
+      finish("ok");
     } catch (error) {
+      metrics.translation_fallbacks += 1;
+      finish(error.code === "ETIMEDOUT" ? "timeout" : "error", { fallback: "original" });
       logWarn(`翻译失败，保留原文：${source.name} — ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -207,28 +216,103 @@ function encodeMimeHeader(value) {
   return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
 }
 
+function parseMailerOptions(arguments_) {
+  let debug = true;
+  const scopes = [];
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const argument = arguments_[index];
+    if (argument === "--no-debug") debug = false;
+    else if (argument === "--debug") {
+      const next = arguments_[index + 1];
+      debug = next === "false" ? false : true;
+      if (next === "true" || next === "false") index += 1;
+    } else if (argument.startsWith("--debug=")) {
+      const value = argument.slice("--debug=".length);
+      if (value !== "true" && value !== "false") throw new Error("--debug 必须是 true 或 false。");
+      debug = value === "true";
+    } else scopes.push(argument);
+  }
+  return { scopes, debug };
+}
+
+function summarizeTimings(result, events, metrics, elapsedMs, runId) {
+  const format = (ms) => `${(ms / 1000).toFixed(3)} 秒`;
+  const labels = { fetch: "抓取", translate: "翻译", render: "正文渲染" };
+  const stages = events.filter((event) => Object.hasOwn(labels, event.stage));
+  const summary = [
+    `日志总结：run_id=${runId}`,
+    `总耗时（截至邮件生成）：${format(elapsedMs)}。不含调试摘要生成及邮件提交；完整总耗时和发送结果见运行日志。`,
+    `发现新文章 ${metrics.new_articles} 篇，报告 ${metrics.report_articles} 篇；抓取失败 ${metrics.fetch_failures} 个源，翻译回退原文 ${metrics.translation_fallbacks} 个源。`,
+    `阶段耗时：${stages.map((event) => `${labels[event.stage]} ${format(event.duration_ms)}`).join("；")}。`,
+  ];
+  const feeds = [...result.feeds, ...result.failures].map((feed) => {
+    const fetch = events.find((event) => event.stage === "fetch_feed" && event.feed_id === feed.id);
+    const translate = events.find((event) => event.stage === "translate_feed" && event.feed_id === feed.id);
+    const duration = (fetch?.duration_ms ?? 0) + (translate?.duration_ms ?? 0);
+    const status = fetch && fetch.status !== "ok" ? "抓取失败" : translate && translate.status !== "ok"
+      ? (translate.status === "timeout" ? "翻译超时，保留原文" : "翻译失败，保留原文") : "成功";
+    summary.push(`订阅源 ${feed.name}（${feed.id}）：拉取 ${fetch ? format(fetch.duration_ms) : "未记录"}；翻译 ${translate ? format(translate.duration_ms) : "未执行"}；累计 ${format(duration)}；${status}。`);
+    return { ...feed, duration, recorded: Boolean(fetch || translate) };
+  });
+  const hottest = [...stages].sort((a, b) => b.duration_ms - a.duration_ms)[0];
+  const slowest = feeds.filter((feed) => feed.recorded).sort((a, b) => b.duration - a.duration)[0];
+  if (hottest && hottest.duration_ms > 0 && elapsedMs > 0) {
+    summary.push(`耗时热点：${labels[hottest.stage]}最耗时（${format(hottest.duration_ms)}，约占截至邮件生成总耗时的 ${(hottest.duration_ms / elapsedMs * 100).toFixed(1)}%）。${slowest ? `最慢订阅源为 ${slowest.name}（${format(slowest.duration)}，拉取与翻译累计）。` : ""}阶段耗时包含单源耗时，两者不重复相加。`);
+  } else summary.push("耗时热点：当前计时精度下无明显热点。");
+  return summary;
+}
+
 async function main() {
-  parseTimeout(process.env.CODEX_TRANSLATION_TIMEOUT_MS);
-  const scopes = process.argv.slice(2);
-  const run = timestamp();
-  const subject = `${subjectPrefix} - ${run.year}-${run.month}-${run.day} ${run.hour}:${run.minute}`;
-  const { result, code, stderr } = await fetchJson(scopes);
-  if (stderr) logWarn(stderr);
-  if (code !== 0) logWarn(`RSS 抓取以退出码 ${code} 完成。`);
-  const newCount = result.feeds.reduce((total, feed) => total + feed.newCount, 0);
-  if (newCount === 0) {
-    logInfo("新文章为 0，跳过邮件发送。");
-    for (const failure of result.failures) logWarn(`抓取失败：${failure.name} — ${failure.error}`);
-    if (code !== 0) process.exitCode = code;
-    return;
+  const started = performance.now();
+  const runId = randomUUID();
+  const timing = collectTimings(runId);
+  const finish = startStage(runId, "total");
+  const metrics = { translation_fallbacks: 0 };
+  let outcome = "failed";
+  let status = "error";
+  try {
+    parseTimeout(process.env.CODEX_TRANSLATION_TIMEOUT_MS);
+    const { scopes, debug } = parseMailerOptions(process.argv.slice(2));
+    const run = timestamp();
+    const subject = `${subjectPrefix} - ${run.year}-${run.month}-${run.day} ${run.hour}:${run.minute}`;
+    const { result, code } = await measureStage(runId, "fetch", () => fetchJson(scopes, runId), ({ result, code }) => ({
+      status: code !== 0 ? (result.feeds.length ? "partial" : "error") : "ok",
+      fetch_failures: result.failures.length,
+    }));
+    if (code !== 0) logWarn(`RSS 抓取以退出码 ${code} 完成。`);
+    timing.events.push(...(result.timings ?? []));
+    metrics.fetch_failures = result.failures.length;
+    metrics.new_articles = result.feeds.reduce((total, feed) => total + feed.newCount, 0);
+    metrics.report_articles = result.feeds.reduce((total, feed) => total + feed.articles.length, 0);
+    if (metrics.new_articles === 0) {
+      logInfo("新文章为 0，跳过邮件发送。");
+      for (const failure of result.failures) logWarn(`抓取失败：${failure.name} — ${failure.error}`);
+      if (code !== 0) process.exitCode = code;
+      outcome = code !== 0 ? "failed" : "no_new_articles";
+      status = code !== 0 ? "error" : "skipped";
+      return;
+    }
+    const translated = await measureStage(runId, "translate", () => translateResult(result, runId, metrics), () => ({
+      status: metrics.translation_fallbacks ? "partial" : "ok",
+      translation_fallbacks: metrics.translation_fallbacks,
+    }));
+    let html = await measureStage(runId, "render", () => renderFetchHtml(translated));
+    if (debug) {
+      html = renderFetchHtml(translated, summarizeTimings(result, timing.events, metrics, performance.now() - started, runId));
+    }
+    if (dryRun) {
+      logInfo(`Dry run: generated RSS email for ${recipient} without sending.`);
+      outcome = "dry_run";
+    } else {
+      await measureStage(runId, "sendmail", () => sendMail(html, subject));
+      logInfo(`Queued RSS email for ${recipient}.`);
+      outcome = "queued";
+    }
+    status = code !== 0 || metrics.translation_fallbacks ? "partial" : "ok";
+  } finally {
+    finish(status, { outcome, ...metrics });
+    timing.stop();
   }
-  const html = renderFetchHtml(await translateResult(result));
-  if (dryRun) {
-    logInfo(`Dry run: generated RSS email for ${recipient} without sending.`);
-    return;
-  }
-  await sendMail(html, subject);
-  logInfo(`Queued RSS email for ${recipient}.`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -238,4 +322,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   });
 }
 
-export { encodeMimeHeader, parseTranslation, translateResult };
+export { encodeMimeHeader, parseTranslation, translateResult, parseMailerOptions, summarizeTimings };
