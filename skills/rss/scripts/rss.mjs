@@ -488,7 +488,7 @@ function safeHref(value) {
   }
 }
 
-function renderFetchHtml(result, debugStatus = []) {
+function renderFetchHtml(result, debugSummary = null) {
   const sections = result.feeds
     .filter((feed) => feed.articles.length > 0)
     .map((feed) => `
@@ -507,8 +507,8 @@ function renderFetchHtml(result, debugStatus = []) {
     ...result.disabled.map((feed) => `已禁用，未抓取：${feed.name}`),
     ...result.failures.map((failure) => `抓取失败：${failure.name} — ${failure.error}`),
   ];
-  status.push(...debugStatus);
   const statusHtml = status.length ? `<section class="status"><h2>状态</h2><ul>${status.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>` : "";
+  const debugHtml = debugSummary ? `<section class="status debug"><h2>调试信息</h2><ul>${debugSummary.lines.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}<li>订阅源<ul>${debugSummary.feeds.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></li></ul></section>` : "";
   const content = sections || "<section class=\"empty\"><p>没有新文章。</p></section>";
   const css = `
     body{margin:0;background:#0b1220;color:#dce9fb;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
@@ -522,7 +522,7 @@ function renderFetchHtml(result, debugStatus = []) {
     @media(max-width:700px){.markdown-body{padding:6px 4px 0}.feed{padding:6px}.articles li{padding:7px 0}}
   `;
   const timestamp = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", dateStyle: "medium", timeStyle: "short", hourCycle: "h23" }).format(new Date());
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body><main class="markdown-body">${content}${statusHtml}</main><footer class="report-footer">获取时间：${escapeHtml(timestamp)}（Asia/Shanghai）</footer></body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body><main class="markdown-body">${content}${statusHtml}${debugHtml}</main><footer class="report-footer">获取时间：${escapeHtml(timestamp)}（Asia/Shanghai）</footer></body></html>`;
 }
 
 async function fetchFeeds(arguments_) {

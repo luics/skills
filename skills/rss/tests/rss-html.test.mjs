@@ -413,17 +413,25 @@ test("encodes non-ASCII mail subjects and lets the mailer dry-run with RSS_FEEDS
   assert.ok(events.every((event) => event.stage !== "sendmail"));
 });
 
-test("records feed and total failure timings without translating or sending", async (t) => {
+test("sends a status report when all feeds fail without translating", async (t) => {
   const fixture = await startFixtureServer(t, { "/bad.xml": { status: 500, body: "unavailable" } });
   const { workspace } = await createWorkspace(t, [{ id: "bad", name: "Bad feed", url: fixture.url("/bad.xml") }]);
-  await assert.rejects(execFileAsync(process.execPath, [rssCli, "sendmail"], { cwd: workspace }), (error) => {
-    const events = timingEvents(error.stderr);
-    assert.deepEqual(events.map((event) => event.stage), ["fetch_feed", "fetch", "total"]);
-    assert.ok(events.every((event) => event.status === "error"));
-    assert.equal(events.at(-1).outcome, "failed");
-    assert.equal(events.at(-1).fetch_failures, "1");
-    return error.code === 1;
+  const fakeSendmail = await writeFakeSendmail(workspace);
+  const capturedMail = path.join(workspace, "message.eml");
+  const { stderr } = await execFileAsync(process.execPath, [rssCli, "sendmail"], {
+    cwd: workspace,
+    env: { ...process.env, DRY_RUN: "0", SENDMAIL_PATH: fakeSendmail, CAPTURE_FILE: capturedMail },
   });
+  const events = timingEvents(stderr);
+  assert.deepEqual(events.map((event) => event.stage), ["fetch_feed", "fetch", "render", "sendmail", "total"]);
+  assert.equal(events[0].status, "error");
+  assert.equal(events.at(-1).status, "partial");
+  assert.equal(events.at(-1).outcome, "queued");
+  assert.equal(events.at(-1).fetch_failures, "1");
+  const message = await readFile(capturedMail, "utf8");
+  const html = Buffer.from(message.split("\r\n\r\n")[1], "base64").toString("utf8");
+  assert.match(html, /没有新文章/);
+  assert.match(html, /抓取失败：Bad feed/);
 });
 
 test("keeps failed-feed cursors while advancing successful feeds in a mixed run", async (t) => {
@@ -597,22 +605,26 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
   const html = Buffer.from(encodedHtml, "base64").toString("utf8");
   assert.match(html, /<!doctype html>/i);
   assert.match(html, /中文 Article/);
-  assert.match(html, /<h2>状态<\/h2>/);
-  assert.match(html, /总耗时（截至邮件生成）/);
-  assert.match(html, /订阅源 Mailer fixture（mailer）：拉取/);
+  assert.match(html, /<h2>调试信息<\/h2>/);
+  assert.match(html, /总耗时（截至提交前）/);
+  assert.match(html, /<li>订阅源<ul><li>✅Mailer fixture：拉取/);
   assert.match(html, /耗时热点/);
 
   await rm(capturedMessage);
   const capturedPrompts = path.join(workspace, "empty-prompts.jsonl");
-  const skipped = await execFileAsync(process.execPath, [rssCli, "sendmail"], {
+  const empty = await execFileAsync(process.execPath, [rssCli, "sendmail"], {
     cwd: workspace,
     env: { ...environment, DRY_RUN: "0", CODEX_CAPTURE_FILE: capturedPrompts },
   });
-  assert.match(skipped.stdout, /新文章为 0，跳过邮件发送/);
-  const skippedEvents = timingEvents(skipped.stderr);
-  assert.deepEqual(skippedEvents.map((event) => event.stage), ["fetch_feed", "fetch", "total"]);
-  assert.equal(skippedEvents.at(-1).outcome, "no_new_articles");
-  await assert.rejects(readFile(capturedMessage), { code: "ENOENT" });
+  assert.match(empty.stdout, /Queued RSS email/);
+  const emptyEvents = timingEvents(empty.stderr);
+  assert.deepEqual(emptyEvents.map((event) => event.stage), ["fetch_feed", "fetch", "render", "sendmail", "total"]);
+  assert.equal(emptyEvents.at(-1).outcome, "queued");
+  assert.equal(emptyEvents.at(-1).new_articles, "0");
+  const emptyMail = await readFile(capturedMessage, "utf8");
+  const emptyHtml = Buffer.from(emptyMail.split("\r\n\r\n")[1], "base64").toString("utf8");
+  assert.match(emptyHtml, /没有新文章/);
+  assert.match(emptyHtml, /总耗时（截至提交前）/);
   await assert.rejects(readFile(capturedPrompts), { code: "ENOENT" });
 
   await runRss(["feed", "update", "mailer", "--lastest-article-at", "1970-01-01T00:00:00Z"], workspace);
@@ -620,7 +632,7 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
   assert.equal(timingEvents(noDebug.stderr).at(-1).outcome, "queued");
   const plainMail = await readFile(capturedMessage, "utf8");
   const plainHtml = Buffer.from(plainMail.split("\r\n\r\n")[1].replaceAll("\r\n", "").trim(), "base64").toString("utf8");
-  assert.doesNotMatch(plainHtml, /日志总结|耗时热点|总耗时（截至邮件生成）/);
+  assert.doesNotMatch(plainHtml, /日志总结|耗时热点|总耗时（截至提交前）/);
 
   await runRss(["feed", "update", "mailer", "--lastest-article-at", "1970-01-01T00:00:00Z"], workspace);
   await assert.rejects(
@@ -727,10 +739,14 @@ test("debug summary derives hotspots from timings and escapes source names", () 
   ];
   const summary = summarizeTimings(result, events, { new_articles: 2, report_articles: 1, fetch_failures: 1, translation_fallbacks: 1 }, 1000, "test-run");
   const html = renderFetchHtml(result, summary);
-  assert.match(html, /总耗时（截至邮件生成）：1.000 秒/);
-  assert.match(html, /翻译最耗时（0.700 秒，约占截至邮件生成总耗时的 70.0%）/);
-  assert.match(html, /累计 0.790 秒；翻译超时，保留原文/);
-  assert.match(html, /Bad source（bad）：拉取 0.050 秒；翻译 未执行/);
+  assert.match(html, /总耗时（截至提交前）：1.000s（拉取 0.200s；翻译 0.700s；渲染正文 0.010s）/);
+  assert.match(html, /翻译最耗时（0.700s，约占截至提交前总耗时的 70.0%）/);
+  assert.match(html, /❌&lt;script&gt;source&lt;\/script&gt;：拉取 0.100s；翻译 0.690s；累计 0.790s/);
+  assert.match(html, /❌Bad source：拉取 0.050s；翻译 未执行/);
+  assert.ok(html.indexOf("总耗时（截至提交前）：") < html.indexOf("耗时热点："));
+  assert.doesNotMatch(html, /阶段耗时：|总耗时（截至邮件生成）/);
+  assert.ok(html.indexOf("耗时热点：") < html.indexOf("<li>订阅源<ul>"));
+  assert.doesNotMatch(html, /日志总结/);
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /&lt;script&gt;/);
   assert.match(renderFetchHtml(result), /抓取失败：Bad source/);

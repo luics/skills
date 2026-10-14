@@ -235,31 +235,33 @@ function parseMailerOptions(arguments_) {
   return { scopes, debug };
 }
 
-function summarizeTimings(result, events, metrics, elapsedMs, runId) {
-  const format = (ms) => `${(ms / 1000).toFixed(3)} 秒`;
+function summarizeTimings(result, events, metrics, elapsedMs) {
+  const format = (ms) => `${(ms / 1000).toFixed(3)}s`;
   const labels = { fetch: "抓取", translate: "翻译", render: "正文渲染" };
   const stages = events.filter((event) => Object.hasOwn(labels, event.stage));
+  const breakdown = [["fetch", "拉取"], ["translate", "翻译"], ["render", "渲染正文"]]
+    .map(([stage, label]) => {
+      const event = stages.find((event) => event.stage === stage);
+      return `${label} ${event ? format(event.duration_ms) : "未执行"}`;
+    }).join("；");
   const summary = [
-    `日志总结：run_id=${runId}`,
-    `总耗时（截至邮件生成）：${format(elapsedMs)}。不含调试摘要生成及邮件提交；完整总耗时和发送结果见运行日志。`,
     `发现新文章 ${metrics.new_articles} 篇，报告 ${metrics.report_articles} 篇；抓取失败 ${metrics.fetch_failures} 个源，翻译回退原文 ${metrics.translation_fallbacks} 个源。`,
-    `阶段耗时：${stages.map((event) => `${labels[event.stage]} ${format(event.duration_ms)}`).join("；")}。`,
+    `总耗时（截至提交前）：${format(elapsedMs)}（${breakdown}）`,
   ];
   const feeds = [...result.feeds, ...result.failures].map((feed) => {
     const fetch = events.find((event) => event.stage === "fetch_feed" && event.feed_id === feed.id);
     const translate = events.find((event) => event.stage === "translate_feed" && event.feed_id === feed.id);
     const duration = (fetch?.duration_ms ?? 0) + (translate?.duration_ms ?? 0);
-    const status = fetch && fetch.status !== "ok" ? "抓取失败" : translate && translate.status !== "ok"
-      ? (translate.status === "timeout" ? "翻译超时，保留原文" : "翻译失败，保留原文") : "成功";
-    summary.push(`订阅源 ${feed.name}（${feed.id}）：拉取 ${fetch ? format(fetch.duration_ms) : "未记录"}；翻译 ${translate ? format(translate.duration_ms) : "未执行"}；累计 ${format(duration)}；${status}。`);
-    return { ...feed, duration, recorded: Boolean(fetch || translate) };
+    const failed = Boolean(feed.error || (fetch && fetch.status !== "ok") || (translate && translate.status !== "ok"));
+    const line = `${failed ? "❌" : "✅"}${feed.name}：拉取 ${fetch ? format(fetch.duration_ms) : "未记录"}；翻译 ${translate ? format(translate.duration_ms) : "未执行"}；累计 ${format(duration)}`;
+    return { ...feed, duration, recorded: Boolean(fetch || translate), line };
   });
   const hottest = [...stages].sort((a, b) => b.duration_ms - a.duration_ms)[0];
   const slowest = feeds.filter((feed) => feed.recorded).sort((a, b) => b.duration - a.duration)[0];
   if (hottest && hottest.duration_ms > 0 && elapsedMs > 0) {
-    summary.push(`耗时热点：${labels[hottest.stage]}最耗时（${format(hottest.duration_ms)}，约占截至邮件生成总耗时的 ${(hottest.duration_ms / elapsedMs * 100).toFixed(1)}%）。${slowest ? `最慢订阅源为 ${slowest.name}（${format(slowest.duration)}，拉取与翻译累计）。` : ""}阶段耗时包含单源耗时，两者不重复相加。`);
+    summary.push(`耗时热点：${labels[hottest.stage]}最耗时（${format(hottest.duration_ms)}，约占截至提交前总耗时的 ${(hottest.duration_ms / elapsedMs * 100).toFixed(1)}%）。${slowest ? `最慢订阅源为 ${slowest.name}（${format(slowest.duration)}，拉取与翻译累计）。` : ""}阶段耗时包含单源耗时，两者不重复相加。`);
   } else summary.push("耗时热点：当前计时精度下无明显热点。");
-  return summary;
+  return { lines: summary, feeds: feeds.map((feed) => feed.line) };
 }
 
 async function main() {
@@ -285,20 +287,16 @@ async function main() {
     metrics.new_articles = result.feeds.reduce((total, feed) => total + feed.newCount, 0);
     metrics.report_articles = result.feeds.reduce((total, feed) => total + feed.articles.length, 0);
     if (metrics.new_articles === 0) {
-      logInfo("新文章为 0，跳过邮件发送。");
+      logInfo("新文章为 0，仍生成并发送邮件。");
       for (const failure of result.failures) logWarn(`抓取失败：${failure.name} — ${failure.error}`);
-      if (code !== 0) process.exitCode = code;
-      outcome = code !== 0 ? "failed" : "no_new_articles";
-      status = code !== 0 ? "error" : "skipped";
-      return;
     }
-    const translated = await measureStage(runId, "translate", () => translateResult(result, runId, metrics), () => ({
+    const translated = metrics.new_articles === 0 ? result : await measureStage(runId, "translate", () => translateResult(result, runId, metrics), () => ({
       status: metrics.translation_fallbacks ? "partial" : "ok",
       translation_fallbacks: metrics.translation_fallbacks,
     }));
     let html = await measureStage(runId, "render", () => renderFetchHtml(translated));
     if (debug) {
-      html = renderFetchHtml(translated, summarizeTimings(result, timing.events, metrics, performance.now() - started, runId));
+      html = renderFetchHtml(translated, summarizeTimings(result, timing.events, metrics, performance.now() - started));
     }
     if (dryRun) {
       logInfo(`Dry run: generated RSS email for ${recipient} without sending.`);
