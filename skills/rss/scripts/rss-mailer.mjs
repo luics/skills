@@ -6,6 +6,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { writeFile } from "node:fs/promises";
 import { renderFetchHtml } from "./rss.mjs";
 import { logInfo, logWarn, logError } from "./logger.mjs";
 import { startStage, measureStage, collectTimings } from "./timing.mjs";
@@ -218,10 +219,15 @@ function encodeMimeHeader(value) {
 
 function parseMailerOptions(arguments_) {
   let debug = true;
+  let outputHtml;
   const scopes = [];
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
-    if (argument === "--no-debug") debug = false;
+    if (argument === "--output-html" || argument.startsWith("--output-html=")) {
+      const value = argument === "--output-html" ? arguments_[++index] : argument.slice("--output-html=".length);
+      if (!value?.trim() || value.startsWith("--")) throw new Error("--output-html 需要指定文件路径。");
+      outputHtml = value;
+    } else if (argument === "--no-debug") debug = false;
     else if (argument === "--debug") {
       const next = arguments_[index + 1];
       debug = next === "false" ? false : true;
@@ -232,7 +238,7 @@ function parseMailerOptions(arguments_) {
       debug = value === "true";
     } else scopes.push(argument);
   }
-  return { scopes, debug };
+  return { scopes, debug, ...(outputHtml ? { outputHtml } : {}) };
 }
 
 function summarizeTimings(result, events, metrics, elapsedMs) {
@@ -274,7 +280,7 @@ async function main() {
   let status = "error";
   try {
     parseTimeout(process.env.CODEX_TRANSLATION_TIMEOUT_MS);
-    const { scopes, debug } = parseMailerOptions(process.argv.slice(2));
+    const { scopes, debug, outputHtml } = parseMailerOptions(process.argv.slice(2));
     const run = timestamp();
     const subject = `${subjectPrefix} - ${run.year}-${run.month}-${run.day} ${run.hour}:${run.minute}`;
     const { result, code } = await measureStage(runId, "fetch", () => fetchJson(scopes, runId), ({ result, code }) => ({
@@ -297,6 +303,11 @@ async function main() {
     let html = await measureStage(runId, "render", () => renderFetchHtml(translated));
     if (debug) {
       html = renderFetchHtml(translated, summarizeTimings(result, timing.events, metrics, performance.now() - started));
+    }
+    if (outputHtml) {
+      const outputPath = path.resolve(projectDir, outputHtml);
+      await writeFile(outputPath, html, "utf8");
+      logInfo(`Saved RSS email HTML to ${outputPath}.`);
     }
     if (dryRun) {
       logInfo(`Dry run: generated RSS email for ${recipient} without sending.`);

@@ -19,7 +19,7 @@ function usage() {
 
 Usage:
   node scripts/rss.mjs [--feeds <absolute-path>] [fetch] [scope ...] [--limit <count>] [--dry-run] [--markdown|--html|--json]
-  node scripts/rss.mjs sendmail [scope ...] [--debug[=true|false]|--no-debug]
+  node scripts/rss.mjs sendmail [scope ...] [--debug[=true|false]|--no-debug] [--output-html <path>]
   node scripts/rss.mjs feed list [--json]
   node scripts/rss.mjs feed add --id <id> --name <name> --url <rss-url>
   node scripts/rss.mjs feed update <id|url> [--id <id>] [--name <name>] [--url <rss-url>] [--lastest-article-at <iso-utc>] [--disabled <true|false>]

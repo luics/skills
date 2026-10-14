@@ -403,7 +403,8 @@ test("encodes non-ASCII mail subjects and lets the mailer dry-run with RSS_FEEDS
   }]);
   const fakeCodex = await writeFakeCodex(workspace);
 
-  const { stdout, stderr } = await execFileAsync(process.execPath, [rssMailer], {
+  const outputHtml = path.join(workspace, "preview.html");
+  const { stdout, stderr } = await execFileAsync(process.execPath, [rssMailer, "--output-html", outputHtml], {
     cwd: workspace,
     env: { ...process.env, DRY_RUN: "1", RSS_FEEDS_PATH: feedsPath, MAIL_TO: "test@example.com", CODEX_EXECUTABLE: fakeCodex },
   });
@@ -411,6 +412,7 @@ test("encodes non-ASCII mail subjects and lets the mailer dry-run with RSS_FEEDS
   const events = timingEvents(stderr);
   assert.equal(events.at(-1).outcome, "dry_run");
   assert.ok(events.every((event) => event.stage !== "sendmail"));
+  assert.match(await readFile(outputHtml, "utf8"), /<h2>调试信息<\/h2>/);
 });
 
 test("sends a status report when all feeds fail without translating", async (t) => {
@@ -590,7 +592,7 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
     CAPTURE_FILE: capturedMessage,
   };
 
-  const sent = await execFileAsync(process.execPath, [rssMailer], { cwd: workspace, env: environment });
+  const sent = await execFileAsync(process.execPath, [rssCli, "sendmail", "--output-html=report.html"], { cwd: workspace, env: environment });
   assert.match(sent.stdout, /Queued RSS email for test@example.com/);
   const sentEvents = timingEvents(sent.stderr);
   assert.deepEqual(sentEvents.map((event) => event.stage), ["fetch_feed", "fetch", "translate_feed", "translate", "render", "sendmail", "total"]);
@@ -603,6 +605,7 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
   assert.match(message, /Content-Transfer-Encoding: base64/);
   const encodedHtml = message.split("\r\n\r\n")[1].replaceAll("\r\n", "").trim();
   const html = Buffer.from(encodedHtml, "base64").toString("utf8");
+  assert.equal(await readFile(path.join(workspace, "report.html"), "utf8"), html);
   assert.match(html, /<!doctype html>/i);
   assert.match(html, /中文 Article/);
   assert.match(html, /<h2>调试信息<\/h2>/);
@@ -721,6 +724,11 @@ test("debug options default on and do not leak into feed scopes", () => {
   }
   assert.deepEqual(parseMailerOptions(["--debug", "verge"]), { scopes: ["verge"], debug: true });
   assert.throws(() => parseMailerOptions(["--debug=invalid"]), /true 或 false/);
+  assert.deepEqual(parseMailerOptions(["--output-html", "report.html", "verge"]), { scopes: ["verge"], debug: true, outputHtml: "report.html" });
+  assert.deepEqual(parseMailerOptions(["--output-html=report.html"]), { scopes: [], debug: true, outputHtml: "report.html" });
+  for (const flags of [["--output-html"], ["--output-html="], ["--output-html", "--no-debug"]]) {
+    assert.throws(() => parseMailerOptions(flags), /需要指定文件路径/);
+  }
 });
 
 test("debug summary derives hotspots from timings and escapes source names", () => {

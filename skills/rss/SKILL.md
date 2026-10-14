@@ -11,7 +11,7 @@ node <skill>/scripts/rss.mjs feed list [--json]
 node <skill>/scripts/rss.mjs feed add --id <id> --name <name> --url <RSS/Atom URL>
 node <skill>/scripts/rss.mjs feed update <id|URL> [--id <id>] [--name <name>] [--url <RSS/Atom URL>] [--lastest-article-at <ISO-UTC>] [--disabled <true|false>]
 node <skill>/scripts/rss.mjs feed remove <id|URL> --confirm
-node <skill>/scripts/rss.mjs sendmail [scope ...] [--debug[=true|false]|--no-debug]
+node <skill>/scripts/rss.mjs sendmail [scope ...] [--debug[=true|false]|--no-debug] [--output-html <path>]
 ```
 
 `fetch` is the default command. By default the scripts use `feeds.json` in the working directory; use `--feeds` when the file is elsewhere. Use `--dry-run` to fetch and render without advancing cursors. A scope is either an exact feed URL or a case-insensitive keyword matched against id, name, or URL. Process every matched feed once; report unmatched scopes without stopping other feeds. Do not request article pages: use only RSS/Atom content.
@@ -23,6 +23,8 @@ For conversational output, group feeds that have new entries with Markdown H2 he
 All runtime log lines use a UTC ISO 8601 prefix (`[YYYY-MM-DDTHH:mm:ss.sssZ]`), including warnings, errors, stack traces, and sendmail subprocess output. JSON, HTML, Markdown reports, feed tables, and help output retain their data formats without log prefixes.
 
 The debug total-time row includes its breakdown in the same line: `总耗时（截至提交前）：xxs（拉取 xxs；翻译 xxs；渲染正文 xxs）`. Label an unexecuted stage “未执行” rather than reporting zero duration.
+
+`--output-html <path>` (or `--output-html=<path>`) optionally saves the final email HTML as UTF-8 before delivery, including debug information when enabled. It is disabled by default and also works with `DRY_RUN=1`. Relative paths resolve against the working directory; the parent directory must exist. An existing file is overwritten, and a write failure stops delivery. Supported by both `rss.mjs sendmail` and direct `rss-mailer.mjs` invocation.
 
 The mailer enables `--debug` by default. A separate final “调试信息” section includes article/failure/fallback counts, one “总耗时（截至提交前）” row, hotspot analysis, then a nested “订阅源” list. Omit the old total-time explanation row and the stage-duration row. Feed rows use `✅name：拉取 xxs；翻译 xxs；累计 xxs`, or ❌ when fetching/translation failed or timed out; unexecuted translation is labeled “未执行”. Do not include a “日志总结” row. Use `--debug=false`, `--debug false`, or `--no-debug` to omit this section while keeping normal status messages and runtime logs. The email's total is sampled before generating its final debug summary and submitting the message; submission duration and the final total are only available in runtime logs after sending. These flags work with both `rss.mjs sendmail` and direct `rss-mailer.mjs` invocation.
 
