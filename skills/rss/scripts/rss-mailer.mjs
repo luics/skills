@@ -242,32 +242,45 @@ function parseMailerOptions(arguments_) {
 }
 
 function summarizeTimings(result, events, metrics, elapsedMs) {
-  const format = (ms) => `${(ms / 1000).toFixed(3)}s`;
+  const format = (ms, digits = 1) => `${(ms / 1000).toFixed(digits)}s`;
   const labels = { fetch: "抓取", translate: "翻译", render: "正文渲染" };
   const stages = events.filter((event) => Object.hasOwn(labels, event.stage));
   const breakdown = [["fetch", "拉取"], ["translate", "翻译"], ["render", "渲染正文"]]
     .map(([stage, label]) => {
       const event = stages.find((event) => event.stage === stage);
-      return `${label} ${event ? format(event.duration_ms) : "未执行"}`;
+      return `${label} ${event ? format(event.duration_ms, stage === "render" ? 3 : 1) : "未执行"}`;
     }).join("；");
   const summary = [
     `发现新文章 ${metrics.new_articles} 篇，报告 ${metrics.report_articles} 篇；抓取失败 ${metrics.fetch_failures} 个源，翻译回退原文 ${metrics.translation_fallbacks} 个源。`,
     `总耗时（截至提交前）：${format(elapsedMs)}（${breakdown}）`,
   ];
+  const translationStage = stages.find((event) => event.stage === "translate");
+  const averageTranslationMs = result.feeds.length ? (translationStage?.duration_ms ?? 0) / result.feeds.length : 0;
   const feeds = [...result.feeds, ...result.failures].map((feed) => {
     const fetch = events.find((event) => event.stage === "fetch_feed" && event.feed_id === feed.id);
     const translate = events.find((event) => event.stage === "translate_feed" && event.feed_id === feed.id);
-    const duration = (fetch?.duration_ms ?? 0) + (translate?.duration_ms ?? 0);
+    const fetched = result.feeds.includes(feed);
+    const translationMs = fetched ? averageTranslationMs : 0;
+    const duration = (fetch?.duration_ms ?? 0) + translationMs;
     const failed = Boolean(feed.error || (fetch && fetch.status !== "ok") || (translate && translate.status !== "ok"));
-    const line = `${failed ? "❌" : "✅"}${feed.name}：拉取 ${fetch ? format(fetch.duration_ms) : "未记录"}；翻译 ${translate ? format(translate.duration_ms) : "未执行"}；累计 ${format(duration)}`;
-    return { ...feed, duration, recorded: Boolean(fetch || translate), line };
+    const cells = [
+      `${failed ? "❌" : "✅"}${feed.name}`,
+      fetch ? format(fetch.duration_ms) : "未记录",
+      fetched && translationStage ? format(translationMs) : "未执行",
+      format(duration),
+      fetched ? feed.newCount : "—",
+      fetched ? feed.articles.length : "—",
+    ];
+    return { ...feed, duration, recorded: Boolean(fetch || translate), cells };
   });
   const hottest = [...stages].sort((a, b) => b.duration_ms - a.duration_ms)[0];
   const slowest = feeds.filter((feed) => feed.recorded).sort((a, b) => b.duration - a.duration)[0];
+  const hotspots = [];
   if (hottest && hottest.duration_ms > 0 && elapsedMs > 0) {
-    summary.push(`耗时热点：${labels[hottest.stage]}最耗时（${format(hottest.duration_ms)}，约占截至提交前总耗时的 ${(hottest.duration_ms / elapsedMs * 100).toFixed(1)}%）。${slowest ? `最慢订阅源为 ${slowest.name}（${format(slowest.duration)}，拉取与翻译累计）。` : ""}阶段耗时包含单源耗时，两者不重复相加。`);
-  } else summary.push("耗时热点：当前计时精度下无明显热点。");
-  return { lines: summary, feeds: feeds.map((feed) => feed.line) };
+    hotspots.push(`${labels[hottest.stage]}最耗时：${format(hottest.duration_ms, hottest.stage === "render" ? 3 : 1)}（～${(hottest.duration_ms / elapsedMs * 100).toFixed(1)}%）`);
+    if (slowest) hotspots.push(`最慢订阅源为 ${slowest.name}：${format(slowest.duration)}，拉取与翻译累计`);
+  } else hotspots.push("当前计时精度下无明显热点。");
+  return { lines: summary, hotspots, feeds: feeds.map((feed) => feed.cells) };
 }
 
 async function main() {

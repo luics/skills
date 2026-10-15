@@ -145,7 +145,9 @@ test("renders a compact HTML report from The Verge RSS feed", { timeout: 45_000 
   assert.match(stdout, /\.articles\{margin:8px 0 0;padding:0;list-style:none\}/);
   assert.match(stdout, /p\{margin:4px 0 0;padding-left:8px;/);
   assert.match(stdout, /<time>\[\d{2}\.\d{2}\]<\/time><a href="https:\/\//);
-  assert.match(stdout, /min-width:49px;color:#7ee787/);
+  assert.match(stdout, /min-width:49px;color:#1a7f37/);
+  assert.match(stdout, /<meta name="color-scheme" content="light dark">/);
+  assert.match(stdout, /@media\(prefers-color-scheme:dark\)/);
 
   const feedsAfterDryRun = JSON.parse(await readFile(feedsPath, "utf8"));
   assert.equal(feedsAfterDryRun[0].lastestArticleAt, "1970-01-01T00:00:00Z");
@@ -223,6 +225,24 @@ test("rejects invalid fetch options before requesting a feed", async (t) => {
     runRss(["fetch", "--feeds", feedsPath, "--html", "--json"], workspace),
     (error) => error.code === 1 && /不能同时使用/.test(error.stderr),
   );
+});
+
+test("limits first-time feeds to 10 but returns all new articles for initialized feeds", async (t) => {
+  const items = Array.from({ length: 15 }, (_, index) => rssItem({
+    title: `Article ${index}`, url: `https://example.com/${index}`,
+    publishedAt: new Date(Date.UTC(2024, 0, index + 1)).toUTCString(),
+  }));
+  const fixture = await startFixtureServer(t, { "/rss.xml": { body: rssDocument(items) } });
+  const cursors = [undefined, "", "1970-01-01T00:00:00Z", "1970-01-01T00:00:00.000Z", "2023-12-31T00:00:00Z"];
+  const { workspace } = await createWorkspace(t, cursors.map((cursor, index) => ({
+    id: `feed-${index}`, name: `Feed ${index}`, url: fixture.url("/rss.xml"), lastestArticleAt: cursor,
+  })));
+  const { stdout } = await runRss(["fetch", "--json"], workspace);
+  const result = JSON.parse(stdout);
+  assert.deepEqual(result.feeds.map((feed) => feed.articles.length), [10, 10, 10, 10, 15]);
+  assert.ok(result.feeds.every((feed) => feed.newCount === 15));
+  const saved = JSON.parse(await readFile(path.join(workspace, "feeds.json"), "utf8"));
+  assert.ok(saved.every((feed) => feed.lastestArticleAt === "2024-01-15T00:00:00.000Z"));
 });
 
 test("advances the cursor to the newest article even when output is limited", async (t) => {
@@ -610,7 +630,8 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
   assert.match(html, /中文 Article/);
   assert.match(html, /<h2>调试信息<\/h2>/);
   assert.match(html, /总耗时（截至提交前）/);
-  assert.match(html, /<li>订阅源<ul><li>✅Mailer fixture：拉取/);
+  assert.match(html, /<table><caption>订阅源/);
+  assert.match(html, /<td>✅Mailer fixture<\/td>/);
   assert.match(html, /耗时热点/);
 
   await rm(capturedMessage);
@@ -733,7 +754,10 @@ test("debug options default on and do not leak into feed scopes", () => {
 
 test("debug summary derives hotspots from timings and escapes source names", () => {
   const result = {
-    feeds: [{ id: "one", name: "<script>source</script>", articles: [] }],
+    feeds: [
+      { id: "one", name: "<script>source</script>", articles: [], newCount: 2 },
+      { id: "two", name: "Second feed", articles: [], newCount: 3 },
+    ],
     failures: [{ id: "bad", name: "Bad source", error: "unavailable" }],
     disabled: [], unmatched: [],
   };
@@ -743,17 +767,25 @@ test("debug summary derives hotspots from timings and escapes source names", () 
     { stage: "render", duration_ms: 10 },
     { stage: "fetch_feed", feed_id: "one", duration_ms: 100, status: "ok" },
     { stage: "fetch_feed", feed_id: "bad", duration_ms: 50, status: "error" },
+    { stage: "fetch_feed", feed_id: "two", duration_ms: 300, status: "ok" },
+    { stage: "translate_feed", feed_id: "two", duration_ms: 10, status: "ok" },
     { stage: "translate_feed", feed_id: "one", duration_ms: 690, status: "timeout" },
   ];
   const summary = summarizeTimings(result, events, { new_articles: 2, report_articles: 1, fetch_failures: 1, translation_fallbacks: 1 }, 1000, "test-run");
   const html = renderFetchHtml(result, summary);
-  assert.match(html, /总耗时（截至提交前）：1.000s（拉取 0.200s；翻译 0.700s；渲染正文 0.010s）/);
-  assert.match(html, /翻译最耗时（0.700s，约占截至提交前总耗时的 70.0%）/);
-  assert.match(html, /❌&lt;script&gt;source&lt;\/script&gt;：拉取 0.100s；翻译 0.690s；累计 0.790s/);
-  assert.match(html, /❌Bad source：拉取 0.050s；翻译 未执行/);
+  assert.match(html, /总耗时（截至提交前）：1.0s（拉取 0.2s；翻译 0.7s；渲染正文 0.010s）/);
+  assert.match(html, /<li>耗时热点：<ul><li>翻译最耗时：0.7s（～70.0%）<\/li><li>最慢订阅源为 Second feed：0.7s，拉取与翻译累计<\/li>/);
+  assert.deepEqual(summary.feeds, [
+    ["❌<script>source</script>", "0.1s", "0.3s", "0.5s", 2, 0],
+    ["✅Second feed", "0.3s", "0.3s", "0.7s", 3, 0],
+    ["❌Bad source", "0.1s", "未执行", "0.1s", "—", "—"],
+  ]);
+  assert.match(html, /<td>❌&lt;script&gt;source&lt;\/script&gt;<\/td>/);
+  assert.match(html, /<th scope="col">发现<\/th><th scope="col">报告<\/th>/);
   assert.ok(html.indexOf("总耗时（截至提交前）：") < html.indexOf("耗时热点："));
   assert.doesNotMatch(html, /阶段耗时：|总耗时（截至邮件生成）/);
-  assert.ok(html.indexOf("耗时热点：") < html.indexOf("<li>订阅源<ul>"));
+  assert.ok(html.indexOf("耗时热点：") < html.indexOf("<table><caption>订阅源"));
+  assert.doesNotMatch(html, /阶段耗时包含单源耗时，两者不重复相加/);
   assert.doesNotMatch(html, /日志总结/);
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /&lt;script&gt;/);

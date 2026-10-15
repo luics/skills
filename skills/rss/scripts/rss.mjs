@@ -432,7 +432,7 @@ function selectFeeds(feeds, scopes) {
 }
 
 function parseLimit(value) {
-  if (value === undefined) return DEFAULT_LIMIT;
+  if (value === undefined) return undefined;
   if (typeof value !== "string" || !/^\d+$/.test(value) || Number(value) < 1) {
     fail("--limit 必须是正整数。");
   }
@@ -508,21 +508,32 @@ function renderFetchHtml(result, debugSummary = null) {
     ...result.failures.map((failure) => `抓取失败：${failure.name} — ${failure.error}`),
   ];
   const statusHtml = status.length ? `<section class="status"><h2>状态</h2><ul>${status.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>` : "";
-  const debugHtml = debugSummary ? `<section class="status debug"><h2>调试信息</h2><ul>${debugSummary.lines.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}<li>订阅源<ul>${debugSummary.feeds.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></li></ul></section>` : "";
+  const debugHtml = debugSummary ? `<section class="status debug"><h2>调试信息</h2><ul>${debugSummary.lines.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}<li>耗时热点：<ul>${debugSummary.hotspots.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></li></ul><div class="debug-table"><table><caption>订阅源（翻译耗时在抓取成功的订阅源间平均分摊）</caption><thead><tr>${["title", "拉取", "翻译", "累计", "发现", "报告"].map((label) => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${debugSummary.feeds.map((cells) => `<tr>${cells.map((cell) => `<td>${escapeHtml(String(cell))}</td>`).join("")}</tr>`).join("")}</tbody></table></div></section>` : "";
   const content = sections || "<section class=\"empty\"><p>没有新文章。</p></section>";
   const css = `
-    body{margin:0;background:#0b1220;color:#dce9fb;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
+    :root{color-scheme:light dark;supported-color-schemes:light dark}
+    body{margin:0;background:#f6f8fa;color:#1f2328;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
     .markdown-body{max-width:900px;margin:auto;padding:8px 6px 0}
-    h2{margin:0;border-bottom:1px solid #263b57;padding-bottom:.35em;font-size:17px}
-    .feed{margin:0 0 12px;background:#101b2e;border-left:3px solid #1f6feb;padding:8px}
-    .articles{margin:8px 0 0;padding:0;list-style:none}.articles li{padding:8px 0;border-bottom:1px solid #263b57}.articles li:last-child{border:0;padding-bottom:0}
-    time{display:inline-block;min-width:49px;color:#7ee787;font-variant-numeric:tabular-nums}a{color:#79c0ff;text-decoration:none;font-weight:600}p{margin:4px 0 0;padding-left:8px;color:#aabbd1;font-size:13px}
-    .status,.empty{margin:0 0 12px;padding:8px;background:#101b2e;border-left:3px solid #f2cc60}.status h2{color:#f2cc60}.status ul{margin:8px 0 0;padding-left:12px;color:#cbd9eb}.empty{color:#aabbd1}
-    .report-footer{box-sizing:border-box;position:relative;left:50%;width:100vw;margin:12px 0 0 -50vw;padding:8px max(6px,calc((100vw - 900px)/2 + 6px));background:#101b2e;color:#86a7cd;font-size:12px}
+    h2{margin:0;border-bottom:1px solid #d0d7de;padding-bottom:.35em;font-size:17px}
+    .feed{margin:0 0 12px;background:#ffffff;border-left:3px solid #0969da;padding:8px}
+    .articles{margin:8px 0 0;padding:0;list-style:none}.articles li{padding:8px 0;border-bottom:1px solid #d0d7de}.articles li:last-child{border:0;padding-bottom:0}
+    time{display:inline-block;min-width:49px;color:#1a7f37;font-variant-numeric:tabular-nums}a{color:#0969da;text-decoration:none;font-weight:600}p{margin:4px 0 0;padding-left:8px;color:#57606a;font-size:13px}
+    .status,.empty{margin:0 0 12px;padding:8px;background:#ffffff;border-left:3px solid #9a6700}.status h2{color:#9a6700}.status ul{margin:8px 0 0;padding-left:12px;color:#424a53}.empty{color:#57606a}
+    .report-footer{box-sizing:border-box;position:relative;left:50%;width:100vw;margin:12px 0 0 -50vw;padding:8px max(6px,calc((100vw - 900px)/2 + 6px));background:#ffffff;color:#57606a;font-size:12px}
+    .debug-table{overflow-x:auto;margin-top:8px}.debug table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}.debug caption{text-align:left;margin-bottom:6px}.debug th,.debug td{text-align:right;padding:6px 4px;border-bottom:1px solid #d0d7de;white-space:nowrap}.debug th:first-child,.debug td:first-child{text-align:left;white-space:normal;overflow-wrap:anywhere}
+    @media(prefers-color-scheme:dark){
+      body{background:#0b1220!important;color:#dce9fb!important}
+      h2,.articles li,.debug th,.debug td{border-bottom-color:#263b57!important}
+      .feed,.status,.empty,.report-footer{background:#101b2e!important}
+      .feed{border-left-color:#1f6feb!important}
+      time{color:#7ee787!important}a{color:#79c0ff!important}p,.empty{color:#aabbd1!important}
+      .status,.empty{border-left-color:#f2cc60!important}.status h2{color:#f2cc60!important}.status ul{color:#cbd9eb!important}
+      .report-footer{color:#86a7cd!important}
+    }
     @media(max-width:700px){.markdown-body{padding:6px 4px 0}.feed{padding:6px}.articles li{padding:7px 0}}
   `;
   const timestamp = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", dateStyle: "medium", timeStyle: "short", hourCycle: "h23" }).format(new Date());
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head><body><main class="markdown-body">${content}${statusHtml}${debugHtml}</main><footer class="report-footer">获取时间：${escapeHtml(timestamp)}（Asia/Shanghai）</footer></body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><style>${css}</style></head><body><main class="markdown-body">${content}${statusHtml}${debugHtml}</main><footer class="report-footer">获取时间：${escapeHtml(timestamp)}（Asia/Shanghai）</footer></body></html>`;
 }
 
 async function fetchFeeds(arguments_) {
@@ -543,14 +554,15 @@ async function fetchFeeds(arguments_) {
       const entries = await getFeedEntries(feed);
       const cursor = Date.parse(feed.lastestArticleAt || EPOCH);
       const effectiveCursor = Number.isNaN(cursor) ? Date.parse(EPOCH) : cursor;
+      const feedLimit = limit ?? (effectiveCursor === Date.parse(EPOCH) ? DEFAULT_LIMIT : Infinity);
       const newer = entries.filter((entry) => Date.parse(entry.publishedAt) > effectiveCursor).sort((left, right) => Date.parse(right.publishedAt) - Date.parse(left.publishedAt));
       const latest = newer[0]?.publishedAt;
       if (latest) {
         feed.lastestArticleAt = latest;
         changed = true;
       }
-      result.feeds.push({ id: feed.id, name: feed.name, articles: newer.slice(0, limit), newCount: newer.length });
-      const timing = finish("ok", { new_articles: newer.length, report_articles: Math.min(newer.length, limit) });
+      result.feeds.push({ id: feed.id, name: feed.name, articles: newer.slice(0, feedLimit), newCount: newer.length });
+      const timing = finish("ok", { new_articles: newer.length, report_articles: Math.min(newer.length, feedLimit) });
       if (timing) result.timings.push(timing);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
