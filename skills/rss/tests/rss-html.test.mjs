@@ -9,7 +9,7 @@ import test from "node:test";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
-import { encodeMimeHeader, parseTranslation, parseMailerOptions, summarizeTimings } from "../scripts/rss-mailer.mjs";
+import { encodeMimeHeader, parseTranslation, parseBatchTranslations, parseMailerOptions, summarizeTimings } from "../scripts/rss-mailer.mjs";
 import { renderFetchHtml } from "../scripts/rss.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -53,20 +53,26 @@ function runRss(arguments_, workspace) {
 
 async function startFixtureServer(t, routes) {
   const requests = [];
+  let active = 0;
+  let peak = 0;
   const server = createServer((request, response) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    response.once("close", () => { active -= 1; });
     requests.push(request.url);
     const route = routes[request.url] || { status: 404, body: "not found" };
     response.writeHead(route.status ?? 200, {
       "content-type": route.contentType ?? "application/rss+xml; charset=utf-8",
       ...route.headers,
     });
-    response.end(route.body);
+    if (route.delayMs) setTimeout(() => response.end(route.body), route.delayMs);
+    else response.end(route.body);
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const { port } = server.address();
-  return { requests, url: (pathname) => `http://127.0.0.1:${port}${pathname}` };
+  return { requests, peak: () => peak, url: (pathname) => `http://127.0.0.1:${port}${pathname}` };
 }
 
 function rssItem({ title, url, description = "", publishedAt }) {
@@ -109,10 +115,9 @@ process.stdin.on("end", () => {
   if (process.env.CODEX_OUTPUT !== undefined) process.stdout.write(process.env.CODEX_OUTPUT);
   else {
     const source = JSON.parse(prompt.slice(prompt.lastIndexOf("\\n") + 1));
-    process.stdout.write(JSON.stringify({
-      name: \`中文 \${source.name}\`,
-      articles: source.articles.map((article) => ({ title: \`中文 \${article.title}\`, description: article.description ? \`中文 \${article.description}\` : "" })),
-    }));
+    process.stdout.write(JSON.stringify({ feeds: source.map(([id, name, articles]) => [
+      id, \`中文 \${name}\`, articles.map(([title, description]) => [\`中文 \${title}\`, description ? [...\`中文 \${description}\`].slice(0, 140).join("") : ""]),
+    ]) }));
   }
 });
 `);
@@ -225,6 +230,24 @@ test("rejects invalid fetch options before requesting a feed", async (t) => {
     runRss(["fetch", "--feeds", feedsPath, "--html", "--json"], workspace),
     (error) => error.code === 1 && /不能同时使用/.test(error.stderr),
   );
+});
+
+test("fetches with three workers, preserves feed order, and measures the batch wall time", async (t) => {
+  const routes = Object.fromEntries(Array.from({ length: 7 }, (_, index) => [
+    `/${index}.xml`, { delayMs: index === 0 ? 250 : 80, body: rssDocument([]) },
+  ]));
+  const fixture = await startFixtureServer(t, routes);
+  const feeds = Array.from({ length: 7 }, (_, index) => ({ id: `feed-${index}`, name: `Feed ${index}`, url: fixture.url(`/${index}.xml`) }));
+  const { workspace } = await createWorkspace(t, feeds);
+  const { stdout } = await execFileAsync(process.execPath, [rssCli, "fetch", "--json"], {
+    cwd: workspace, env: { ...process.env, RSS_RUN_ID: "concurrency-test" },
+  });
+  const result = JSON.parse(stdout);
+  assert.equal(fixture.peak(), 3);
+  assert.equal(fixture.requests.length, 7);
+  assert.deepEqual(result.feeds.map((feed) => feed.id), feeds.map((feed) => feed.id));
+  assert.ok(result.fetchDurationMs >= 250);
+  assert.ok(result.fetchDurationMs < result.timings.reduce((sum, timing) => sum + timing.duration_ms, 0));
 });
 
 test("limits first-time feeds to 10 but returns all new articles for initialized feeds", async (t) => {
@@ -550,7 +573,7 @@ test("does not advance a cursor after too many redirects", async (t) => {
   assert.ok(fixture.requests.includes("/redirect-5.xml"));
 });
 
-test("reports escaped disabled and unmatched values in HTML status", async (t) => {
+test("omits the status section from HTML without debug information", async (t) => {
   const { workspace, feedsPath } = await createWorkspace(t, [{
     id: "disabled",
     name: "Bad <script>alert(1)</script>",
@@ -560,8 +583,7 @@ test("reports escaped disabled and unmatched values in HTML status", async (t) =
   }]);
 
   const { stdout } = await runRss(["fetch", "--feeds", feedsPath, "disabled", "<img src=x onerror=alert(1)>", "--html"], workspace);
-  assert.match(stdout, /Bad &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-  assert.match(stdout, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(stdout, /<h2>状态<\/h2>|已禁用，未抓取|未匹配的范围/);
   assert.doesNotMatch(stdout, /<script>alert\(1\)<\/script>/);
   assert.doesNotMatch(stdout, /<img src=x onerror=alert\(1\)>/);
 });
@@ -615,7 +637,7 @@ test("sends MIME email through a fake sendmail command and surfaces delivery fai
   const sent = await execFileAsync(process.execPath, [rssCli, "sendmail", "--output-html=report.html"], { cwd: workspace, env: environment });
   assert.match(sent.stdout, /Queued RSS email for test@example.com/);
   const sentEvents = timingEvents(sent.stderr);
-  assert.deepEqual(sentEvents.map((event) => event.stage), ["fetch_feed", "fetch", "translate_feed", "translate", "render", "sendmail", "total"]);
+  assert.deepEqual(sentEvents.map((event) => event.stage), ["fetch_feed", "fetch", "translate", "render", "sendmail", "total"]);
   assert.ok(sentEvents.every((event) => event.status === "ok"));
   assert.equal(sentEvents.at(-1).outcome, "queued");
   assert.equal(sentEvents.at(-1).new_articles, "1");
@@ -691,13 +713,16 @@ test("translates every fetched feed from JSON before mail HTML rendering", async
     },
   });
   const prompts = (await readFile(capturedPrompts, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-  assert.equal(prompts.length, 2);
+  assert.equal(prompts.length, 1);
   assert.deepEqual(prompts.map(({ args }) => args), [
-    ["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--model", "gpt-6-luna", "--config", 'model_reasoning_effort="none"', "-"],
-    ["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--model", "gpt-6-luna", "--config", 'model_reasoning_effort="none"', "-"],
+    ["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--model", "gpt-6-luna", "--output-schema", path.join(skillDir, "scripts", "translation.schema.json"), "--config", 'model_reasoning_effort="none"', "-"],
   ]);
-  assert.match(prompts[0].prompt, /"id":"one"/);
-  assert.match(prompts[1].prompt, /"id":"two"/);
+  const payload = JSON.parse(prompts[0].prompt.split("\n").at(-1));
+  assert.deepEqual(payload, [
+    ["one", "One feed", [["One", "First"]]],
+    ["two", "Two feed", [["Two", "Second"]]],
+  ]);
+  assert.match(prompts[0].prompt, /about 140 Unicode characters/);
   const message = await readFile(capturedMail, "utf8");
   const html = Buffer.from(message.split("\r\n\r\n")[1].replaceAll("\r\n", "").trim(), "base64").toString("utf8");
   assert.match(html, /中文 One feed/);
@@ -725,8 +750,7 @@ test("keeps original feed text when Codex fails or returns invalid translations"
       });
       assert.match(stderr, /翻译失败，保留原文：Original feed/);
       const events = timingEvents(stderr);
-      assert.equal(events.find((event) => event.stage === "translate_feed").status, name === "timeout" ? "timeout" : "error");
-      assert.equal(events.find((event) => event.stage === "translate").status, "partial");
+      assert.equal(events.find((event) => event.stage === "translate").status, name === "timeout" ? "timeout" : "partial");
       assert.equal(events.at(-1).translation_fallbacks, "1");
       assert.equal(events.at(-1).outcome, "queued");
       const message = await readFile(capturedMail, "utf8");
@@ -753,13 +777,15 @@ test("debug options default on and do not leak into feed scopes", () => {
 });
 
 test("debug summary derives hotspots from timings and escapes source names", () => {
+  const article = { title: "Article", url: "https://example.com/article", publishedAt: "2024-01-01T00:00:00Z", description: "" };
   const result = {
     feeds: [
-      { id: "one", name: "<script>source</script>", articles: [], newCount: 2 },
-      { id: "two", name: "Second feed", articles: [], newCount: 3 },
+      { id: "one", name: "<script>source</script>", articles: [{ ...article, description: "😀".repeat(49) }], newCount: 2 },
+      { id: "two", name: "Second feed", articles: [article], newCount: 3 },
+      { id: "empty", name: "Empty feed", articles: [], newCount: 0 },
     ],
     failures: [{ id: "bad", name: "Bad source", error: "unavailable" }],
-    disabled: [], unmatched: [],
+    disabled: [{ id: "disabled", name: "Disabled <feed>" }], unmatched: [],
   };
   const events = [
     { stage: "fetch", duration_ms: 200 },
@@ -768,20 +794,27 @@ test("debug summary derives hotspots from timings and escapes source names", () 
     { stage: "fetch_feed", feed_id: "one", duration_ms: 100, status: "ok" },
     { stage: "fetch_feed", feed_id: "bad", duration_ms: 50, status: "error" },
     { stage: "fetch_feed", feed_id: "two", duration_ms: 300, status: "ok" },
+    { stage: "fetch_feed", feed_id: "empty", duration_ms: 200, status: "ok" },
     { stage: "translate_feed", feed_id: "two", duration_ms: 10, status: "ok" },
     { stage: "translate_feed", feed_id: "one", duration_ms: 690, status: "timeout" },
   ];
   const summary = summarizeTimings(result, events, { new_articles: 2, report_articles: 1, fetch_failures: 1, translation_fallbacks: 1 }, 1000, "test-run");
   const html = renderFetchHtml(result, summary);
   assert.match(html, /总耗时（截至提交前）：1.0s（拉取 0.2s；翻译 0.7s；渲染正文 0.010s）/);
-  assert.match(html, /<li>耗时热点：<ul><li>翻译最耗时：0.7s（～70.0%）<\/li><li>最慢订阅源为 Second feed：0.7s，拉取与翻译累计<\/li>/);
+  assert.match(html, /<li>耗时热点：<ul><li>翻译最耗时：0.7s（～70.0%）<\/li><li>最慢订阅源为 &lt;script&gt;source&lt;\/script&gt;：0.6s，拉取与翻译累计<\/li>/);
   assert.deepEqual(summary.feeds, [
-    ["❌<script>source</script>", "0.1s", "0.3s", "0.5s", 2, 0],
-    ["✅Second feed", "0.3s", "0.3s", "0.7s", 3, 0],
-    ["❌Bad source", "0.1s", "未执行", "0.1s", "—", "—"],
+    ["❌<script>source</script>", "0.1", "0.1", "0.6", "0.6", "1/2"],
+    ["✅Second feed", "0.3", "0.1", "0.1", "0.2", "1/3"],
+    ["✅Empty feed", "0.2", "0.1", "-", "0.1", 0],
+    ["❌Bad source", "0.1", "0.1", "-", "0.1", "—"],
+    ["⚠️Disabled <feed>", "-", "-", "-", "-", "-"],
   ]);
   assert.match(html, /<td>❌&lt;script&gt;source&lt;\/script&gt;<\/td>/);
-  assert.match(html, /<th scope="col">发现<\/th><th scope="col">报告<\/th>/);
+  assert.doesNotMatch(html, /<th scope="col">发现<\/th>/);
+  assert.match(html, /<th scope="col">报告<\/th>/);
+  assert.match(html, /<td>1\/2<\/td>/);
+  assert.match(html, /<caption>订阅源<\/caption>/);
+  assert.doesNotMatch(html, /平均分摊/);
   assert.ok(html.indexOf("总耗时（截至提交前）：") < html.indexOf("耗时热点："));
   assert.doesNotMatch(html, /阶段耗时：|总耗时（截至邮件生成）/);
   assert.ok(html.indexOf("耗时热点：") < html.indexOf("<table><caption>订阅源"));
@@ -789,8 +822,38 @@ test("debug summary derives hotspots from timings and escapes source names", () 
   assert.doesNotMatch(html, /日志总结/);
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /&lt;script&gt;/);
-  assert.match(renderFetchHtml(result), /抓取失败：Bad source/);
+  assert.match(html, /抓取失败：Bad source/);
+  assert.match(html, /<td>⚠️Disabled &lt;feed&gt;<\/td><td>-<\/td>/);
+  assert.doesNotMatch(html, /<h2>状态<\/h2>/);
   assert.doesNotMatch(renderFetchHtml(result), /日志总结/);
+});
+
+test("validates compact batch summaries, flexible lengths, source order and empty descriptions", () => {
+  const sources = [{ id: "one", name: "One", articles: [{ title: "Title", description: "Original description" }, { title: "Empty", description: "" }] }];
+  const output = (description, empty = "", id = "one") => JSON.stringify([[id, "中文", [["标题", description], ["空", empty]]]]);
+  assert.deepEqual(parseBatchTranslations(JSON.stringify({ feeds: JSON.parse(output("摘要")) }), sources), parseBatchTranslations(output("摘要"), sources));
+  assert.equal(parseBatchTranslations(output("文".repeat(140)), sources)[0].articles[0].description.length, 140);
+  assert.equal([...parseBatchTranslations(output("😀".repeat(140)), sources)[0].articles[0].description].length, 140);
+  assert.equal(parseBatchTranslations(output("文".repeat(145)), sources)[0].articles[0].description, "文".repeat(145));
+  assert.equal(parseBatchTranslations(output("😀".repeat(145)), sources)[0].articles[0].description, "😀".repeat(145));
+  for (const invalid of [output(""), output("摘要", "invented"), output("摘要", "", "wrong"), '[["one","中文",[]]]', '[]']) {
+    assert.throws(() => parseBatchTranslations(invalid, sources));
+  }
+  assert.deepEqual(parseBatchTranslations(`\`\`\`json\n${output("摘要")}\n\`\`\``, sources)[0].articles, [
+    { title: "标题", description: "摘要" }, { title: "空", description: "" },
+  ]);
+});
+
+test("repairs typographic JSON delimiters without changing quotation marks in text", () => {
+  const sources = [{ id: "one", articles: [{ title: "Title", description: "Description" }] }];
+  for (const output of [
+    '[["one","源",[[“标题”,“他说：“你好”，并提到"Codex"。”]]]]',
+    '[[“one”,“源”,[[“标题”,“他说：“你好”，并提到"Codex"。”]]]]',
+    JSON.stringify([["one", "源", [["标题", '他说：“你好”，并提到"Codex"。']]]]),
+  ]) {
+    assert.equal(parseBatchTranslations(output, sources)[0].articles[0].description, '他说：“你好”，并提到"Codex"。');
+  }
+  assert.throws(() => parseBatchTranslations('[[“one”,“源”,[[“标题”,“未闭合]]]]', sources));
 });
 
 test("validates Codex translation shape without accepting lost or incomplete articles", () => {

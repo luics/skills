@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 import { logInfo, logError } from "./logger.mjs";
 import { startStage } from "./timing.mjs";
+import { performance } from "node:perf_hooks";
 
 let FEEDS_PATH = resolve(process.cwd(), "feeds.json");
 const EPOCH = "1970-01-01T00:00:00Z";
@@ -504,11 +505,11 @@ function renderFetchHtml(result, debugSummary = null) {
     .join("\n");
   const status = [
     ...result.unmatched.map((scope) => `未匹配的范围：${scope}`),
-    ...result.disabled.map((feed) => `已禁用，未抓取：${feed.name}`),
     ...result.failures.map((failure) => `抓取失败：${failure.name} — ${failure.error}`),
   ];
-  const statusHtml = status.length ? `<section class="status"><h2>状态</h2><ul>${status.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>` : "";
-  const debugHtml = debugSummary ? `<section class="status debug"><h2>调试信息</h2><ul>${debugSummary.lines.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}<li>耗时热点：<ul>${debugSummary.hotspots.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></li></ul><div class="debug-table"><table><caption>订阅源（翻译耗时在抓取成功的订阅源间平均分摊）</caption><thead><tr>${["title", "拉取", "翻译", "累计", "发现", "报告"].map((label) => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${debugSummary.feeds.map((cells) => `<tr>${cells.map((cell) => `<td>${escapeHtml(String(cell))}</td>`).join("")}</tr>`).join("")}</tbody></table></div></section>` : "";
+  const statusHtml = "";
+  if (debugSummary) debugSummary = { ...debugSummary, lines: [...status, ...debugSummary.lines] };
+  const debugHtml = debugSummary ? `<section class="status debug"><h2>调试信息</h2><ul>${debugSummary.lines.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}<li>耗时热点：<ul>${debugSummary.hotspots.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></li></ul><div class="debug-table"><table><caption>订阅源</caption><thead><tr>${["title", "实拉", "平拉", "翻译", "累计", "报告"].map((label) => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${debugSummary.feeds.map((cells) => `<tr>${cells.map((cell) => `<td>${escapeHtml(String(cell))}</td>`).join("")}</tr>`).join("")}</tbody></table></div></section>` : "";
   const content = sections || "<section class=\"empty\"><p>没有新文章。</p></section>";
   const css = `
     :root{color-scheme:light dark;supported-color-schemes:light dark}
@@ -548,7 +549,10 @@ async function fetchFeeds(arguments_) {
   if (process.env.RSS_RUN_ID) result.timings = [];
   let changed = false;
 
-  for (const feed of selected) {
+  const outcomes = new Array(selected.length);
+  let nextIndex = 0;
+  const fetchStarted = performance.now();
+  async function fetchFeed(feed, index) {
     const finish = startStage(process.env.RSS_RUN_ID, "fetch_feed", { feed_id: feed.id });
     try {
       const entries = await getFeedEntries(feed);
@@ -561,16 +565,26 @@ async function fetchFeeds(arguments_) {
         feed.lastestArticleAt = latest;
         changed = true;
       }
-      result.feeds.push({ id: feed.id, name: feed.name, articles: newer.slice(0, feedLimit), newCount: newer.length });
+      outcomes[index] = { feed: { id: feed.id, name: feed.name, articles: newer.slice(0, feedLimit), newCount: newer.length } };
       const timing = finish("ok", { new_articles: newer.length, report_articles: Math.min(newer.length, feedLimit) });
       if (timing) result.timings.push(timing);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      result.failures.push({ id: feed.id, name: feed.name, error: message });
+      outcomes[index] = { failure: { id: feed.id, name: feed.name, error: message } };
       const timing = finish(error.code === "ETIMEDOUT" ? "timeout" : "error");
       if (timing) result.timings.push(timing);
     }
   }
+
+  await Promise.all(Array.from({ length: Math.min(3, selected.length) }, async () => {
+    while (nextIndex < selected.length) {
+      const index = nextIndex++;
+      await fetchFeed(selected[index], index);
+    }
+  }));
+  result.fetchDurationMs = selected.length ? performance.now() - fetchStarted : 0;
+  result.feeds = outcomes.filter((item) => item.feed).map((item) => item.feed);
+  result.failures = outcomes.filter((item) => item.failure).map((item) => item.failure);
 
   if (changed && !dryRun) await writeFeeds(feeds);
   if (options.has("json")) console.log(JSON.stringify(result, null, 2));
