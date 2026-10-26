@@ -23,8 +23,8 @@ const dryRun = /^(1|true|yes)$/i.test(process.env.DRY_RUN ?? "");
 const feedsPath = process.env.RSS_FEEDS_PATH?.trim();
 const sendmailExecutable = process.env.SENDMAIL_PATH ?? "/usr/sbin/sendmail";
 const codexExecutable = process.env.CODEX_EXECUTABLE?.trim() || "codex";
-const translationModel = "gpt-6-luna";
-const translationReasoningEffort = "none";
+const translationModel = process.env.CODEX_TRANSLATION_MODEL?.trim() || "gpt-6-luna";
+const translationReasoningEffort = process.env.CODEX_TRANSLATION_EFFORT?.trim() || "low";
 
 function timestamp() {
   return new Intl.DateTimeFormat("en-CA", {
@@ -229,7 +229,7 @@ function runCodex(prompt) {
       }
       if (code !== 0) {
         const detail = Buffer.concat(stderr).toString("utf8").trim();
-        reject(new Error(`Codex 翻译失败（退出码：${code ?? signal ?? "未知"}）${detail ? `：${detail}` : ""}`));
+        reject(new Error(`Codex 翻译失败（模型：${translationModel}；退出码：${code ?? signal ?? "未知"}）${detail ? `：${detail}` : ""}`));
         return;
       }
       resolve(Buffer.concat(stdout).toString("utf8"));
