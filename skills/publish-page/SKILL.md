@@ -5,7 +5,7 @@ description: Publish files with timestamped names via OSS, SCP, or local copy. U
 
 Accept any regular file, including HTML, images, video, audio, documents, archives, and files without an extension. Upload the original bytes.
 
-Run `scripts/publish-page-oss.sh <file>` by default. It uploads to `oss://luics-sites/<filename>`, then prints the OSS URI and `http://sites.bryanxu.top/<filename>`. Optionally pass a different OSS destination prefix as the second argument.
+Run `scripts/publish-page-oss.sh <file>` by default. It uploads to `oss://luics-sites/<filename>`, then prints the OSS URI and `https://sites.bryanxu.top/<filename>`. Optionally pass a different OSS destination prefix as the second argument.
 
 For an SCP deployment with public-URL verification, run `scripts/publish-page-scp.sh <file>`. When omitted, its destination and identity come from `SCP_DESTINATION` and `SCP_IDENTIFY`; positional overrides take precedence. `SCP_IDENTIFY` must name an existing SSH identity file. The script always publishes through SCP.
 

@@ -69,7 +69,7 @@ oss_uri=$(printf '%s\n' "$oss_output" | sed -n '1p')
 public_url=$(printf '%s\n' "$oss_output" | sed -n '2p')
 oss_timestamp=${oss_uri#oss://luics-sites/page-}
 oss_timestamp=${oss_timestamp%.html}
-public_timestamp=${public_url#http://sites.bryanxu.top/page-}
+public_timestamp=${public_url#https://sites.bryanxu.top/page-}
 public_timestamp=${public_timestamp%.html}
 assert_millisecond_timestamp "$oss_timestamp"
 if [ "$public_timestamp" != "$oss_timestamp" ]; then

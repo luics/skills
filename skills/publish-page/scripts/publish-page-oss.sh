@@ -30,7 +30,7 @@ esac
 
 filename=$(publish_filename "$file")
 uri="$destination/$filename"
-public_url="http://sites.bryanxu.top/$filename"
+public_url="https://sites.bryanxu.top/$filename"
 ossutil_command=${OSSUTIL:-ossutil}
 
 "$ossutil_command" cp "$file" "$uri"
