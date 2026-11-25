@@ -3,26 +3,26 @@ set -eu
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 . "$script_dir/timestamp-ms.sh"
+. "$script_dir/publish-filename.sh"
 
 if [ "$#" -lt 1 ] || [ "$#" -gt 4 ]; then
-  echo "Usage: $0 <page.html> [user@host:/remote-directory] [public-base-url] [identity-file]" >&2
+  echo "Usage: $0 <file> [user@host:/remote-directory] [public-base-url] [identity-file]" >&2
   exit 64
 fi
 
-page=$1
+file=$1
 destination=${2:-${SCP_DESTINATION:-}}
 destination=${destination%/}
 base_url=${3:-https://bryanxu.top/public}
 base_url=${base_url%/}
 identity=${4:-${SCP_IDENTIFY:-}}
 
-case "$page" in
-  *.html) stem=${page##*/}; stem=${stem%.html} ;;
-  *) echo "The page must have a .html extension." >&2; exit 64 ;;
+case "$file" in
+  -*) file="./$file" ;;
 esac
 
-if [ ! -f "$page" ]; then
-  echo "The page file does not exist." >&2
+if [ ! -f "$file" ]; then
+  echo "The source must be an existing regular file." >&2
   exit 66
 fi
 
@@ -46,10 +46,9 @@ if [ ! -f "$identity" ]; then
   exit 66
 fi
 
-timestamp=$(timestamp_ms)
-filename="${stem}-${timestamp}.html"
-scp -i "$identity" "$page" "$destination/$filename"
+filename=$(publish_filename "$file")
+scp -i "$identity" "$file" "$destination/$filename"
 
 url="$base_url/$filename"
-curl --fail --silent --show-error --location --max-time 20 --output /dev/null "$url"
+curl --head --fail --silent --show-error --location --max-time 20 --output /dev/null "$url"
 printf '%s\n' "$url"
